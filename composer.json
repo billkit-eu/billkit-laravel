@@ -1,0 +1,60 @@
+{
+    "name": "billkit-eu/billkit-laravel",
+    "description": "First-class Laravel integration for BillKit: a Cashier-shaped billing layer on the BillKit API (Mollie-backed, EU).",
+    "type": "library",
+    "license": "Apache-2.0",
+    "homepage": "https://billkit.eu",
+    "keywords": ["billkit", "laravel", "cashier", "billing", "subscriptions", "mollie", "stripe", "saas", "eu"],
+    "authors": [
+        { "name": "BillKit", "email": "sdk@billkit.eu" }
+    ],
+    "support": {
+        "issues": "https://github.com/billkit-eu/billkit-laravel/issues",
+        "source": "https://github.com/billkit-eu/billkit-laravel",
+        "docs": "https://docs.billkit.eu"
+    },
+    "require": {
+        "php": ">=8.2",
+        "ext-json": "*",
+        "billkit-eu/billkit-php": "^0.1",
+        "illuminate/config": "^11.0|^12.0",
+        "illuminate/contracts": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/events": "^11.0|^12.0",
+        "illuminate/http": "^11.0|^12.0",
+        "illuminate/routing": "^11.0|^12.0",
+        "illuminate/support": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "phpunit/phpunit": "^10.5|^11.0",
+        "phpstan/phpstan": "^2.0",
+        "larastan/larastan": "^3.0",
+        "friendsofphp/php-cs-fixer": "^3.64",
+        "nyholm/psr7": "^1.8"
+    },
+    "autoload": {
+        "psr-4": { "BillKit\\Laravel\\": "src/" },
+        "files": ["src/helpers.php"]
+    },
+    "autoload-dev": {
+        "psr-4": { "BillKit\\Laravel\\Tests\\": "tests/" }
+    },
+    "extra": {
+        "laravel": {
+            "providers": ["BillKit\\Laravel\\BillKitServiceProvider"]
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "cs": "php-cs-fixer fix --diff",
+        "cs:check": "php-cs-fixer fix --dry-run --diff"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {}
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
