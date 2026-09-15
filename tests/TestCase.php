@@ -18,7 +18,7 @@ abstract class TestCase extends Orchestra
 
     protected FakeHttpClient $http;
 
-    protected const WEBHOOK_SECRET = 'whsec_test_secret';
+    protected const WEBHOOK_SECRET = 'bkwhsec_test_secret';
 
     /**
      * @param \Illuminate\Foundation\Application $app
@@ -35,7 +35,7 @@ abstract class TestCase extends Orchestra
      */
     protected function defineEnvironment($app): void
     {
-        $app['config']->set('billkit.api_key', 'sk_test_unit');
+        $app['config']->set('billkit.api_key', 'bk_test_unit');
         $app['config']->set('billkit.base_url', 'https://test.billkit.eu');
         $app['config']->set('billkit.webhook.secret', self::WEBHOOK_SECRET);
         $app['config']->set('billkit.model', User::class);
@@ -43,7 +43,7 @@ abstract class TestCase extends Orchestra
         $this->http = new FakeHttpClient();
         $psr17 = new Psr17Factory();
         $app->singleton(BillKitClient::class, fn (): BillKitClient => new BillKitClient(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             baseUrl: 'https://test.billkit.eu',
             httpClient: $this->http,
             requestFactory: $psr17,
