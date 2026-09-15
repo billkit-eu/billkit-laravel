@@ -77,12 +77,40 @@ final class LoggingTest extends TestCase
     public function test_a_bad_channel_name_never_breaks_the_container(): void
     {
         // A logging typo must not turn every billing request into a 500.
-        // Laravel's LogManager degrades to an emergency logger rather than
-        // throwing; either way, resolving the client has to succeed.
         config()->set('billkit.log_channel', 'no_such_channel');
 
         $logger = $this->loggerOf($this->clientFromServiceProvider());
 
         self::assertInstanceOf(LoggerInterface::class, $logger);
+    }
+
+    public function test_an_undefined_channel_degrades_to_silence_not_the_emergency_logger(): void
+    {
+        // The real hazard: Log::channel() does NOT throw for an unknown
+        // name — LogManager catches the failure and returns its emergency
+        // logger, a `single` file handler at `debug`. So the old try/catch
+        // never fired and a typo'd BILLKIT_LOG_CHANNEL switched the SDK's
+        // full request lifecycle ON, at the most verbose level, into a file
+        // nobody nominated.
+        config()->set('billkit.log_channel', 'billkit_typo');
+
+        $logger = $this->loggerOf($this->clientFromServiceProvider());
+
+        self::assertInstanceOf(NullLogger::class, $logger);
+    }
+
+    public function test_an_undefined_channel_warns_once_on_the_default_channel(): void
+    {
+        config()->set('billkit.log_channel', 'billkit_typo');
+
+        Log::shouldReceive('warning')
+            ->once()
+            ->withArgs(static fn (string $message): bool => str_contains($message, 'billkit_typo')
+                && str_contains($message, 'BILLKIT_LOG_CHANNEL'));
+        // The facade is mocked wholesale, so `channel()` must stay unused
+        // on this path — which is exactly the assertion.
+        Log::shouldReceive('channel')->never();
+
+        $this->clientFromServiceProvider();
     }
 }

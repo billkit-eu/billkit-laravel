@@ -59,6 +59,15 @@ The buyer is redirected to the hosted Mollie checkout. When they finish, BillKit
 sends `subscription.created`; the package's webhook controller creates the local
 `Subscription` and links it to the billable by customer id.
 
+Catalog work has no Cashier-shaped equivalent, so reach for the underlying PHP
+client through the `billkit()` helper. Retiring a price, for example, is an
+archive rather than a delete: the price keeps its id and stays readable, because
+subscriptions renew against it by id and keep renewing at it.
+
+```php
+billkit()->prices->update('price_pro_monthly', ['active' => false]);
+```
+
 ## One-shot payments
 
 For a single, mandate-less charge (Cashier's `charge()`, a one-time purchase
@@ -108,6 +117,12 @@ $sub->cancel();                    // cancel at period end
 $sub->resume();                    // un-pause
 $sub->reactivate();                // undo a scheduled cancellation
 $sub->pause();
+
+// Pausing stops the renewal, not the current period. `status` stays
+// `active` (the customer paid for the period they are in) and the pause
+// shows up in `renewal_state`, which is what `paused()` reads. A paused
+// subscription is therefore still `valid()`.
+$sub->paused();
 
 // Mandate re-auth + hosted billing portal both return a redirect URL:
 return redirect($sub->updatePaymentMethod(route('billing')));

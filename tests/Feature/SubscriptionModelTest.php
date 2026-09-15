@@ -29,8 +29,13 @@ final class SubscriptionModelTest extends TestCase
             self::assertTrue($this->sub(['status' => $status])->valid(), $status);
         }
         self::assertFalse($this->sub(['status' => 'canceled'])->valid());
-        self::assertFalse($this->sub(['status' => 'paused'])->valid());
         self::assertFalse($this->sub(['status' => 'incomplete'])->valid());
+
+        // A paused subscription is still entitled: the customer paid for
+        // the period they are in, and only the renewal is off.
+        self::assertTrue(
+            $this->sub(['status' => 'active', 'renewal_state' => 'paused'])->valid(),
+        );
     }
 
     public function test_on_trial(): void
@@ -80,9 +85,21 @@ final class SubscriptionModelTest extends TestCase
         self::assertFalse($ended->valid());
     }
 
-    public function test_paused_and_past_due_flags(): void
+    public function test_paused_reads_renewal_state_not_status(): void
     {
-        self::assertTrue($this->sub(['status' => 'paused'])->paused());
+        // The wire shape of a paused subscription: status stays `active`
+        // and `renewal_state` carries the pause. Keying `paused()` off
+        // `status` answered "no" for every real paused row.
+        $paused = $this->sub(['status' => 'active', 'renewal_state' => 'paused']);
+        self::assertTrue($paused->paused());
+        self::assertTrue($paused->active());
+
+        self::assertFalse($this->sub(['status' => 'active', 'renewal_state' => 'auto_renew'])->paused());
+        self::assertFalse($this->sub(['status' => 'active'])->paused());
+    }
+
+    public function test_past_due_flag(): void
+    {
         self::assertTrue($this->sub(['status' => 'past_due'])->pastDue());
     }
 }

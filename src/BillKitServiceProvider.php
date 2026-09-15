@@ -7,6 +7,7 @@ namespace BillKit\Laravel;
 use BillKit\BillKitClient;
 use BillKit\Laravel\Http\Controllers\WebhookController;
 use BillKit\Laravel\Http\Middleware\VerifyWebhookSignature;
+use Illuminate\Contracts\Config\Repository;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
@@ -26,7 +27,7 @@ final class BillKitServiceProvider extends ServiceProvider
             return new BillKitClient(
                 apiKey: is_string($apiKey) && $apiKey !== '' ? $apiKey : null,
                 baseUrl: is_string($baseUrl) && $baseUrl !== '' ? $baseUrl : null,
-                logger: self::resolveLogger($config['log_channel'] ?? null),
+                logger: self::resolveLogger($config['log_channel'] ?? null, $app['config']),
             );
         });
     }
@@ -35,17 +36,37 @@ final class BillKitServiceProvider extends ServiceProvider
      * Resolve the configured log channel into a PSR-3 logger.
      *
      * Returns ``null`` (meaning the SDK stays silent) unless the app
-     * names a channel. Opting an application into log output is its own
-     * decision to make, not something a package should do on install.
+     * names a channel that actually exists. Opting an application into
+     * log output is its own decision to make, not something a package
+     * should do on install — and neither is *where* that output lands.
      *
-     * A misconfigured channel name must not take down the container:
-     * ``Log::channel()`` throws for an unknown channel, and a package
-     * that lets that escape turns a logging typo into a 500 on every
-     * request that touches billing. Degrade to silence instead.
+     * The channel is checked against ``config/logging.php`` rather than
+     * left to ``Log::channel()``, because ``Log::channel()`` does not
+     * throw for an unknown name: Laravel's ``LogManager`` catches the
+     * resolution failure and hands back its **emergency logger**, a
+     * `single` file handler at `debug`. So a typo'd ``BILLKIT_LOG_CHANNEL``
+     * did the one thing this method exists to prevent — it switched
+     * logging on, at the most verbose level, into a file the app never
+     * nominated, appending a line per HTTP attempt for every billing
+     * call. The try/catch below is kept as a belt-and-braces guard for
+     * a channel that is declared but fails to build (a bad driver, an
+     * unwritable path).
      */
-    private static function resolveLogger(mixed $channel): ?LoggerInterface
+    private static function resolveLogger(mixed $channel, Repository $config): ?LoggerInterface
     {
         if (! is_string($channel) || $channel === '') {
+            return null;
+        }
+
+        if (! is_array($config->get("logging.channels.{$channel}"))) {
+            // One warning, on the app's own default channel, then silence.
+            // Loud enough to find during setup; not loud enough to become
+            // the log output the typo was about to produce.
+            Log::warning(
+                "BillKit: log channel [{$channel}] is not defined in config/logging.php. " .
+                'The SDK will not log. Check BILLKIT_LOG_CHANNEL.',
+            );
+
             return null;
         }
 
