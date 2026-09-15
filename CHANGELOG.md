@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
-## [Unreleased]
+## [0.2.1]
+
+### Changed
+- Documentation only. API keys are now `bk_live_…` / `bk_test_…` and webhook
+  signing secrets `bkwhsec_…`; every example here used the previous
+  Stripe-shaped `sk_`/`whsec_` spelling. No code in this package changed: it
+  never parsed the prefix, it forwards the key as a bearer token.
+
+## [0.2.0]
 
 ### Fixed
 - `Subscription::paused()` read `status === 'paused'`, a value no BillKit

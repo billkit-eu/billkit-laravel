@@ -8,7 +8,7 @@ return [
     | BillKit API credentials
     |--------------------------------------------------------------------------
     |
-    | Your secret API key (sk_test_... / sk_live_...). The key's prefix already
+    | Your secret API key (bk_test_... / bk_live_...). The key's prefix already
     | encodes the mode, so there is no separate mode switch: use a test key
     | in dev and a live key in production.
     |
@@ -43,7 +43,7 @@ return [
     | Webhooks
     |--------------------------------------------------------------------------
     |
-    | The signing secret (whsec_...) for the webhook endpoint you registered
+    | The signing secret (bkwhsec_...) for the webhook endpoint you registered
     | for this app, plus the replay-tolerance window in seconds.
     |
     */

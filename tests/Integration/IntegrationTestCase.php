@@ -30,7 +30,7 @@ abstract class IntegrationTestCase extends Orchestra
 {
     use RefreshDatabase;
 
-    protected const WEBHOOK_SECRET = 'whsec_laravel_integration_secret';
+    protected const WEBHOOK_SECRET = 'bkwhsec_laravel_integration_secret';
 
     /** @var array{api_key: string, tenant_id: string, mollie_route_id: string} */
     protected static array $tenant;
