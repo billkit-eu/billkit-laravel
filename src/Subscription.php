@@ -95,9 +95,18 @@ class Subscription extends Model
         return $this->status === 'past_due';
     }
 
+    /**
+     * Paused: renewals are off, but the paid-for period is still running.
+     *
+     * Read from `renewal_state`, not `status`. Pausing stops the renewal
+     * and leaves `status` at `active`, because the customer has paid for
+     * the period they are in and is still entitled to it. No BillKit
+     * subscription ever carries `status = 'paused'`, so the old check
+     * here was dead: it answered "no" to every paused subscription.
+     */
     public function paused(): bool
     {
-        return $this->status === 'paused';
+        return $this->renewal_state === 'paused';
     }
 
     public function canceled(): bool

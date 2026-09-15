@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [Unreleased]
+
+### Fixed
+- `Subscription::paused()` read `status === 'paused'`, a value no BillKit
+  subscription ever carries, so it answered "no" for every paused subscription.
+  It now reads `renewal_state === 'paused'`, which is where a pause actually
+  lands: pausing stops the renewal and leaves `status` at `active`, because the
+  customer has paid for the period they are in. A paused subscription is
+  therefore still `valid()`, and the model test now asserts that wire shape
+  instead of an impossible row.
+
+### Changed
+- The README covers the paused shape, and points at
+  `billkit()->prices->update($id, ['active' => false])` for retiring a price.
+  Catalog work has no Cashier-shaped equivalent, so it goes through the
+  underlying PHP client; archiving keeps the price readable and leaves existing
+  subscriptions renewing on it.
+
 ## [0.1.0]
 
 First public release.

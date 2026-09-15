@@ -28,6 +28,7 @@ final class IntegrationTest extends IntegrationTestCase
         'laravel.checkout',
         'laravel.subscription_sync',
         'laravel.subscription_actions',
+        'laravel.paused_state',
         'laravel.refund',
         'laravel.billing_portal',
         'laravel.webhook_signature',
@@ -136,6 +137,27 @@ final class IntegrationTest extends IntegrationTestCase
         $subscription->reactivate();
         self::assertFalse($subscription->cancel_at_period_end);
         self::assertTrue($subscription->active());
+    }
+
+    public function testLaravelPausedState(): void
+    {
+        $subscription = $this->subscribeUser();
+
+        $subscription->pause();
+
+        // Pausing stops the renewal, not the current period: the customer
+        // has paid for the period they are in and keeps it. So `status`
+        // stays `active`, the pause shows up in `renewal_state`, and the
+        // subscription is still entitled.
+        self::assertSame('paused', $subscription->renewal_state);
+        self::assertSame('active', $subscription->status);
+        self::assertTrue($subscription->paused());
+        self::assertTrue($subscription->valid());
+
+        $subscription->resume();
+        self::assertFalse($subscription->paused());
+        self::assertSame('auto_renew', $subscription->renewal_state);
+        self::assertTrue($subscription->valid());
     }
 
     public function testLaravelRefund(): void
