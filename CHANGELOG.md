@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.3.0]
+
+### Added
+- **Metered usage on `Subscription`**, in Cashier's shape:
+  - `reportUsage(int $quantity = 1, ?string $identifier = null, ?int $occurredAt = null, array $metadata = [])`
+  - `usageRecords(?string $invoiceId = null, ?int $limit = null)`
+  - `usageSummary()`
+
+  `$identifier` is the dedupe an idempotency key cannot do. The key covers a
+  retry of one HTTP request; `$identifier` covers a retry of *your* call, which
+  in a Laravel app usually means a queued job replaying or a webhook handled
+  twice. Those reach the API as a genuinely new request with a new key, so pass
+  something derived from the job (`$job->uuid()`, the domain event's primary
+  key) rather than a value that changes per attempt.
+
+  `usageSummary()` is the money view of pending usage, and **`will_charge` is
+  the field to read before showing a customer an amount**: a period under
+  `minimum_charge_cents` (EUR 1.00) is not charged at all, because the payment
+  provider would refuse it, and the usage rolls into the next period instead. A
+  dashboard that renders `gross_cents` as "your next invoice" is wrong exactly
+  when the number is small.
+
+  None of the three re-syncs the local row, unlike `cancel()` / `swap()` /
+  `pause()`. A usage record is not a subscription state change, and syncing a
+  model from a response that describes a usage record would corrupt it. There
+  is a test pinning that.
+
+### Changed
+- Requires `billkit-eu/billkit-php` `>=0.3.0`, for the metered surface above.
+  The old range (`>=0.2.1 <1`) would have resolved either version, which means
+  an install could have satisfied the constraint and still lacked
+  `retrieveUsageSummary`.
+
 ## [0.2.1]
 
 ### Changed

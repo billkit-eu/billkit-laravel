@@ -117,7 +117,7 @@ trait Billable
      * Start a hosted checkout for a price and return a redirectable Checkout.
      *
      * Options: ``success_url``, ``cancel_url`` (else config defaults),
-     * ``trial_days``, ``coupon_code``, ``method`` (creditcard|directdebit|ideal),
+     * ``trial_days``, ``coupon_code``, ``method`` (creditcard|directdebit|ideal|applepay),
      * ``ui_mode``, plus ``email``/``name``/``metadata`` used when creating the
      * customer.
      *
@@ -167,7 +167,7 @@ trait Billable
      *
      * @param int    $amountCents amount to charge, in the currency's minor unit
      * @param string $currency    ISO-4217 code, e.g. ``EUR``
-     * @param string $method      creditcard|directdebit|ideal|bancontact|eps
+     * @param string $method      creditcard|directdebit|ideal|bancontact|eps|applepay
      *
      * @param array<string, mixed> $options
      */

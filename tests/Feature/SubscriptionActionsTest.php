@@ -118,4 +118,89 @@ final class SubscriptionActionsTest extends TestCase
         self::assertStringEndsWith('/v1/subscriptions/sub_r/reauthorize_payment_method', (string) $this->http->lastRequest()->getUri());
         self::assertSame('https://app.test/back', $this->http->bodyOf($this->http->lastRequest())['return_url']);
     }
+
+    // ─── Metered usage ──────────────────────────────────────────────
+
+    public function test_report_usage_posts_quantity_and_identifier(): void
+    {
+        $subscription = $this->makeSubscription('sub_meter');
+        $this->http->stage(201, ['id' => 'ur_1', 'object' => 'usage_record', 'identifier' => 'job-42']);
+
+        $record = $subscription->reportUsage(1200, 'job-42');
+
+        $req = $this->http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertStringEndsWith('/v1/subscriptions/sub_meter/usage_records', (string) $req->getUri());
+        self::assertSame(
+            ['quantity' => 1200, 'identifier' => 'job-42'],
+            $this->http->bodyOf($req),
+        );
+        self::assertSame('ur_1', $record['id']);
+    }
+
+    public function test_report_usage_omits_the_identifier_when_not_given(): void
+    {
+        // Dedupe is opt-in: two identical reports at different times are
+        // legitimately two records.
+        $subscription = $this->makeSubscription('sub_meter2');
+        $this->http->stage(201, ['id' => 'ur_2']);
+
+        $subscription->reportUsage();
+
+        self::assertSame(['quantity' => 1], $this->http->bodyOf($this->http->lastRequest()));
+    }
+
+    public function test_report_usage_does_not_touch_the_local_row(): void
+    {
+        // A usage record is not a subscription state change, so unlike
+        // cancel/swap/pause this must not re-sync the model from a response
+        // that describes a usage record rather than a subscription.
+        $subscription = $this->makeSubscription('sub_meter3');
+        $this->http->stage(201, ['id' => 'ur_3', 'status' => 'canceled', 'price_id' => 'price_wrong']);
+
+        $subscription->reportUsage(5);
+
+        $fresh = $subscription->fresh();
+        self::assertNotNull($fresh);
+        self::assertSame('active', $fresh->status);
+        self::assertSame('price_1', $fresh->price_id);
+    }
+
+    public function test_usage_records_forwards_the_pending_filter(): void
+    {
+        $subscription = $this->makeSubscription('sub_meter4');
+        $this->http->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+
+        $subscription->usageRecords('pending', 25);
+
+        $uri = $this->http->lastRequest()->getUri();
+        self::assertSame('GET', $this->http->lastRequest()->getMethod());
+        self::assertStringContainsString('/v1/subscriptions/sub_meter4/usage_records', (string) $uri);
+        parse_str($uri->getQuery(), $query);
+        self::assertSame('pending', $query['invoice_id']);
+        self::assertSame('25', $query['limit']);
+    }
+
+    public function test_usage_summary_reports_that_a_small_period_will_not_charge(): void
+    {
+        $subscription = $this->makeSubscription('sub_meter5');
+        $this->http->stage(200, [
+            'object' => 'usage_summary',
+            'pending_quantity' => 3,
+            'gross_cents' => 15,
+            'will_charge' => false,
+            'minimum_charge_cents' => 100,
+        ]);
+
+        $summary = $subscription->usageSummary();
+
+        self::assertStringEndsWith(
+            '/v1/subscriptions/sub_meter5/usage_summary',
+            (string) $this->http->lastRequest()->getUri(),
+        );
+        // A dashboard rendering gross_cents as "your next invoice" without
+        // reading this is wrong exactly when the number is small.
+        self::assertFalse($summary['will_charge']);
+        self::assertSame(100, $summary['minimum_charge_cents']);
+    }
 }

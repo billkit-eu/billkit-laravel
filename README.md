@@ -129,6 +129,58 @@ return redirect($sub->updatePaymentMethod(route('billing')));
 return $sub->redirectToBillingPortal(route('billing'));
 ```
 
+## Metered usage
+
+For a subscription on a metered price, report what was consumed and BillKit
+invoices the period's total at each close.
+
+```php
+$sub = $user->subscription();
+
+// Report consumption. Pass an identifier derived from the job, not uniqid().
+$sub->reportUsage(quantity: 1200, identifier: $job->uuid());
+
+// Reconcile: what has been reported but not yet billed.
+$sub->usageRecords('pending');
+
+// And what it comes to.
+$summary = $sub->usageSummary();
+$summary['pending_quantity'];     // 1200
+$summary['gross_cents'];          // 2400
+$summary['will_charge'];          // true
+$summary['minimum_charge_cents']; // 100
+```
+
+**`$identifier` is the dedupe an idempotency key cannot do.** The key the SDK
+sends covers a retry of that HTTP request. `$identifier` covers a retry of *your*
+call, which in a Laravel app is usually a queued job replaying or a webhook you
+handle twice: those reach the API as a genuinely new request with a new key, so
+only a natural key stops the second report becoming a second charge. `$job->uuid()`
+or the domain event's primary key both work; a value that changes per attempt
+does not.
+
+```php
+class ReportApiCalls implements ShouldQueue
+{
+    public function handle(): void
+    {
+        $this->user->subscription()->reportUsage(
+            quantity: $this->calls,
+            identifier: $this->job->uuid(),   // survives a retry
+        );
+    }
+}
+```
+
+**Read `will_charge` before showing a customer an amount.** A period whose total
+is under `minimum_charge_cents` (EUR 1.00) is not charged, because the payment
+provider would refuse it. The usage is not lost: it stays pending and rolls into
+the next period, which is then billed for both. A dashboard that renders
+`gross_cents` as "your next invoice" is wrong exactly when the number is small.
+
+None of these three touches the local `Subscription` row, unlike `swap()` or
+`cancel()`. A usage record is not a subscription state change.
+
 ## Webhooks
 
 The package registers `POST /billkit/webhook` (signature-verified) and keeps

@@ -196,6 +196,87 @@ class Subscription extends Model
         return new RedirectResponse($this->billingPortalUrl($returnUrl));
     }
 
+    // ─── Metered usage ──────────────────────────────────────────────
+    //
+    // Cashier's shape (`reportUsage` / `usageRecords`), against BillKit's
+    // metered subscriptions. These do NOT re-sync the model: a usage record
+    // is not a subscription state change, and nothing on this row moves
+    // when one is written.
+
+    /**
+     * Report consumption against this subscription's meter.
+     *
+     * Only valid when the subscription's price is `usage_type: "metered"`.
+     *
+     * `$identifier` is your own id for the event being metered, and it is
+     * the dedupe an idempotency key cannot do. The key covers a retry of
+     * one HTTP request; `$identifier` covers a retry of *your* call — a
+     * queued job replaying, a webhook you handle twice, a retried
+     * `dispatch()` — which reaches the API as a genuinely new request with
+     * a new key. A second report of the same identifier returns the first
+     * record unchanged rather than billing twice.
+     *
+     * In a Laravel app that almost always means: pass something derived
+     * from the job, not `uniqid()`. `$job->uuid()` or the domain event's
+     * primary key both work; a value that changes per attempt does not.
+     *
+     * @param array<string, string> $metadata
+     *
+     * @return array<string, mixed> the created (or already-existing) usage record
+     */
+    public function reportUsage(
+        int $quantity = 1,
+        ?string $identifier = null,
+        ?int $occurredAt = null,
+        array $metadata = [],
+    ): array {
+        return $this->client()->subscriptions->createUsageRecord($this->billkit_id, array_filter([
+            'quantity' => $quantity,
+            'identifier' => $identifier,
+            'occurred_at' => $occurredAt,
+            'metadata' => $metadata === [] ? null : $metadata,
+        ], static fn ($v): bool => $v !== null));
+    }
+
+    /**
+     * One page of usage records, newest first.
+     *
+     * `$invoiceId` filters by billing state: `'pending'` is what the next
+     * period close will bill, a concrete `inv_…` id is what that invoice
+     * billed. Null lists everything.
+     *
+     * @return array<string, mixed>
+     */
+    public function usageRecords(?string $invoiceId = null, ?int $limit = null): array
+    {
+        return $this->client()->subscriptions->listUsageRecords($this->billkit_id, array_filter([
+            'invoice_id' => $invoiceId,
+            'limit' => $limit,
+        ], static fn ($v): bool => $v !== null));
+    }
+
+    /**
+     * What the next period close will bill, priced.
+     *
+     * {@see self::usageRecords()} gives the quantity; this gives the money:
+     * `pending_quantity`, `net_cents` / `tax_cents` / `gross_cents`, and
+     * `will_charge`.
+     *
+     * **Read `will_charge` before showing a customer an amount.** A period
+     * whose total is under `minimum_charge_cents` (EUR 1.00) is not
+     * charged, because the payment provider would refuse it; the usage
+     * stays pending and rolls into the next period, which is then billed
+     * for both. A dashboard that renders `gross_cents` as "your next
+     * invoice" without checking this is wrong exactly when the number is
+     * small.
+     *
+     * @return array<string, mixed>
+     */
+    public function usageSummary(): array
+    {
+        return $this->client()->subscriptions->retrieveUsageSummary($this->billkit_id);
+    }
+
     /**
      * Map a wire subscription object (epoch-int timestamps) onto this row.
      *
