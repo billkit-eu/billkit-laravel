@@ -66,8 +66,6 @@ return [
     */
     'model' => env('BILLKIT_MODEL', 'App\\Models\\User'),
 
-    // Default currency for checkout amounts (BillKit deals in integer cents).
-    'currency' => env('BILLKIT_CURRENCY', 'EUR'),
 
     /*
     |--------------------------------------------------------------------------

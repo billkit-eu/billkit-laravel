@@ -280,25 +280,50 @@ class Subscription extends Model
     /**
      * Map a wire subscription object (epoch-int timestamps) onto this row.
      *
+     * A field the payload does not mention keeps its current value, because
+     * the action endpoints answer with the whole subscription but a caller
+     * may pass a partial object. A field the payload sends as ``null`` is
+     * written as ``null``: ``null`` is an answer, not a gap. Collapsing the
+     * two with ``??`` made a cleared field unclearable — a trial that
+     * converts sends ``trial_end: null`` and would have left the old trial
+     * date on the row forever.
+     *
      * @param array<string, mixed> $data
      */
     public function syncFromApi(array $data): self
     {
-        $this->fill([
-            'price_id' => $data['price_id'] ?? $this->price_id,
-            'status' => is_string($data['status'] ?? null) ? $data['status'] : $this->status,
-            'renewal_state' => $data['renewal_state'] ?? $this->renewal_state,
-            'cancel_at_period_end' => (bool) ($data['cancel_at_period_end'] ?? $this->cancel_at_period_end),
-            'current_period_start' => self::ts($data['current_period_start'] ?? null) ?? $this->current_period_start,
-            'current_period_end' => self::ts($data['current_period_end'] ?? null) ?? $this->current_period_end,
-            'trial_ends_at' => self::ts($data['trial_end'] ?? null) ?? $this->trial_ends_at,
-            'canceled_at' => self::ts($data['canceled_at'] ?? null) ?? $this->canceled_at,
-        ]);
+        $attributes = [];
+        foreach (['price_id', 'renewal_state'] as $column) {
+            if (array_key_exists($column, $data)) {
+                $attributes[$column] = is_string($data[$column]) ? $data[$column] : null;
+            }
+        }
+        // `status` is the one column that is never null, so an unusable value
+        // leaves the row's current status alone rather than clearing it.
+        if (is_string($data['status'] ?? null)) {
+            $attributes['status'] = $data['status'];
+        }
+        if (array_key_exists('cancel_at_period_end', $data)) {
+            $attributes['cancel_at_period_end'] = (bool) $data['cancel_at_period_end'];
+        }
+        foreach ([
+            'current_period_start' => 'current_period_start',
+            'current_period_end' => 'current_period_end',
+            'trial_end' => 'trial_ends_at',
+            'canceled_at' => 'canceled_at',
+        ] as $wire => $column) {
+            if (array_key_exists($wire, $data)) {
+                $attributes[$column] = self::ts($data[$wire]);
+            }
+        }
+
+        $this->fill($attributes);
         $this->save();
 
         return $this;
     }
 
+    /** Epoch seconds to a Carbon, or null for anything that is not one. */
     private static function ts(mixed $epoch): ?Carbon
     {
         return is_int($epoch) ? Carbon::createFromTimestamp($epoch) : null;

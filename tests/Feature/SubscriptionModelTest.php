@@ -102,4 +102,85 @@ final class SubscriptionModelTest extends TestCase
     {
         self::assertTrue($this->sub(['status' => 'past_due'])->pastDue());
     }
+
+    // ── syncFromApi ──────────────────────────────────────────────────
+    //
+    // The mapping reads every field with array_key_exists rather than `??`.
+    // The two are the same until the API sends an explicit null, and then
+    // they are opposites: `??` treats null as "the key was absent" and keeps
+    // the old value, so a field the API had cleared could never be cleared
+    // locally. A trial that converts sends `trial_end: null`.
+
+    public function test_sync_writes_an_explicit_null_as_null(): void
+    {
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_sync',
+            'status' => 'trialing',
+            'trial_ends_at' => now()->addDays(7),
+        ]);
+
+        $sub->syncFromApi(['status' => 'active', 'trial_end' => null]);
+
+        self::assertNull($sub->fresh()->trial_ends_at);
+        self::assertSame('active', $sub->fresh()->status);
+    }
+
+    public function test_sync_leaves_an_absent_key_alone(): void
+    {
+        $trialEnd = now()->addDays(7)->startOfSecond();
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_absent',
+            'status' => 'trialing',
+            'price_id' => 'price_1',
+            'trial_ends_at' => $trialEnd,
+        ]);
+
+        // A partial object: the action endpoints answer with the whole
+        // subscription, but a caller may hand over less than that.
+        $sub->syncFromApi(['status' => 'active']);
+
+        $fresh = $sub->fresh();
+        self::assertSame('price_1', $fresh->price_id);
+        self::assertNotNull($fresh->trial_ends_at);
+        self::assertTrue($trialEnd->equalTo($fresh->trial_ends_at));
+    }
+
+    public function test_sync_ignores_a_status_that_is_not_a_string(): void
+    {
+        // `status` is the one column that is never null, so an unusable
+        // value must leave the row's current status alone rather than
+        // clear it.
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_status',
+            'status' => 'active',
+        ]);
+
+        $sub->syncFromApi(['status' => 123, 'renewal_state' => 'paused']);
+
+        self::assertSame('active', $sub->fresh()->status);
+        self::assertSame('paused', $sub->fresh()->renewal_state);
+    }
+
+    public function test_sync_casts_epoch_timestamps(): void
+    {
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_ts',
+            'status' => 'active',
+        ]);
+
+        $sub->syncFromApi([
+            'current_period_start' => 1790000000,
+            'current_period_end' => 1792592000,
+            'cancel_at_period_end' => true,
+        ]);
+
+        $fresh = $sub->fresh();
+        self::assertSame(1790000000, $fresh->current_period_start?->getTimestamp());
+        self::assertSame(1792592000, $fresh->current_period_end?->getTimestamp());
+        self::assertTrue($fresh->cancel_at_period_end);
+    }
 }

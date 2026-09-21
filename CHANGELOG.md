@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.5.0] - 2026-09-22
+
+### Fixed
+- **`Subscription::syncFromApi()` can clear a field.** It read every value with
+  `??`, which treats an explicit `null` as an absent key, so a field the API
+  cleared kept its old value forever — a trial that converted sends
+  `trial_end: null` and left the stale trial date on the row. Absent keys still
+  preserve the current value; `null` is now written as `null`.
+- **`createOrGetBillKitCustomer()` throws instead of returning `''`.** A create
+  response without an `id` used to yield an empty string, which every caller
+  fed straight into a `customer_id` field and saw as a puzzling `400` one call
+  later, with nothing pointing back at the cause.
+
+### Removed
+- The `currency` config key (`BILLKIT_CURRENCY`). Nothing read it: `charge()`
+  takes the ISO-4217 code as a required argument, because a one-shot in the
+  wrong currency is charged rather than rejected.
+
 ## [0.4.0]
 
 ### Changed

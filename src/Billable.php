@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BillKit\Laravel;
 
 use BillKit\BillKitClient;
+use BillKit\Exception\BillKitException;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 /**
@@ -70,7 +71,17 @@ trait Billable
             return $id;
         }
 
-        return (string) ($this->createAsBillKitCustomer($options)['id'] ?? '');
+        $created = $this->createAsBillKitCustomer($options)['id'] ?? null;
+        if (! is_string($created) || $created === '') {
+            // Every caller feeds this straight into a `customer_id` field.
+            // Returning '' would send an empty id and surface as a puzzling
+            // 400 one call later, with nothing pointing back to here.
+            throw new BillKitException(
+                'BillKit returned a customer without an id, so this model could not be linked to one.',
+            );
+        }
+
+        return $created;
     }
 
     /**

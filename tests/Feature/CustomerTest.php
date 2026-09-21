@@ -68,4 +68,30 @@ final class CustomerTest extends TestCase
         self::assertTrue($user->subscribed('addon'));
         self::assertFalse($user->subscribed('nonexistent'));
     }
+
+    /**
+     * A create response without an id used to yield `''`, which every caller
+     * fed straight into a `customer_id` field — surfacing as a puzzling 400
+     * one call later, with nothing pointing back at the cause.
+     */
+    public function test_create_or_get_refuses_a_customer_without_an_id(): void
+    {
+        $this->http->stage(200, ['object' => 'customer']);
+
+        $this->expectException(\BillKit\Exception\BillKitException::class);
+        $this->expectExceptionMessage('without an id');
+
+        $this->makeUser()->createOrGetBillKitCustomer();
+    }
+
+    public function test_create_or_get_creates_once_and_persists_the_id(): void
+    {
+        $this->http->stage(200, ['id' => 'cus_new', 'object' => 'customer']);
+        $user = $this->makeUser();
+
+        self::assertSame('cus_new', $user->createOrGetBillKitCustomer());
+        // A second call must not create a second customer.
+        self::assertSame('cus_new', $user->fresh()?->createOrGetBillKitCustomer());
+        self::assertCount(1, $this->http->requests);
+    }
 }
