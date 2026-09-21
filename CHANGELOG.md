@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.4.0]
+
+### Changed
+- **Requires `billkit-eu/billkit-php` 0.4.0 or later** (was 0.3.0 or later).
+  0.3.x sent an empty request body as `[]` instead of `{}`, which the API
+  rejects with a 422. That reached this package through
+  `createAsBillKitCustomer()`: the payload drops null values, so a Billable
+  with neither an email nor a name — a Team model, a placeholder user — sent
+  an empty body, and creating a customer with no attributes is otherwise a
+  perfectly valid call.
+
+  The floor is raised rather than left at 0.3.0 so that updating this package
+  actually moves you onto the fixed client. Composer will not update a
+  transitive dependency on its own.
+
+### Added
+- Nothing here, but the PHP client this wraps gains `$client->creditNotes` and
+  `$client->invoices->void($id)`. Both are reachable through `billkit()`.
+
 ## [0.3.0]
 
 ### Added
