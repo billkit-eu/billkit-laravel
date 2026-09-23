@@ -128,7 +128,7 @@ trait Billable
      * Start a hosted checkout for a price and return a redirectable Checkout.
      *
      * Options: ``success_url``, ``cancel_url`` (else config defaults),
-     * ``trial_days``, ``coupon_code``, ``method`` (creditcard|directdebit|ideal|applepay),
+     * ``trial_days``, ``coupon_code``, ``method`` (creditcard|directdebit|ideal|eps|applepay|paypal),
      * ``ui_mode``, plus ``email``/``name``/``metadata`` used when creating the
      * customer.
      *
@@ -170,15 +170,21 @@ trait Billable
      * ``0`` disables refunds entirely, the default is ``30`` and the maximum is
      * ``365``. Refund a settled one-shot via {@see self::refundOneShot()}.
      *
+     * ``banktransfer`` is the one method here that settles in DAYS rather than
+     * seconds: the payer is handed bank details and Mollie holds the payment
+     * open for about a fortnight. The returned ``Checkout`` is not a completed
+     * sale, and a pending bank transfer is neither a failure nor something to
+     * poll — wait for the webhook.
+     *
      * Options: ``success_url`` / ``cancel_url`` (else config defaults),
-     * ``description``, ``refund_window_days``, ``metadata``. ``metadata`` is
-     * PaymentIntent-semantic: it is attached to the one-shot payment only,
-     * never to the customer. ``email``/``name``/``country_code`` are used only
-     * when a BillKit customer must be created for this model.
+     * ``description``, ``refund_window_days``, ``tax_behavior``, ``metadata``.
+     * ``metadata`` is PaymentIntent-semantic: it is attached to the one-shot
+     * payment only, never to the customer. ``email``/``name``/``country_code``
+     * are used only when a BillKit customer must be created for this model.
      *
      * @param int    $amountCents amount to charge, in the currency's minor unit
      * @param string $currency    ISO-4217 code, e.g. ``EUR``
-     * @param string $method      creditcard|directdebit|ideal|bancontact|eps|applepay
+     * @param string $method      creditcard|directdebit|ideal|bancontact|eps|applepay|paypal|banktransfer
      *
      * @param array<string, mixed> $options
      */

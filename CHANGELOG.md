@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.6.0] - 2026-09-23
+
+### Added
+- **`eps` and `paypal` can now start a subscription**, not just take a one-off
+  charge. Pass either as `checkout()`'s `method` option.
+  - **EPS** mints a *SEPA* mandate, exactly as iDEAL does, so the subscription
+    renews on `directdebit`.
+  - EPS is **Austria-only** and carries a **EUR 1.00 minimum** — a hundred
+    times iDEAL's. A fully-discounted first charge on a price offering it is
+    raised to that floor.
+  - **PayPal** mints a `paypal` mandate and renews on itself. No country
+    restriction.
+  - `bancontact` stays one-off only: Mollie's recurring guide and its
+    Bancontact method page disagree about whether it mints a mandate, and that
+    is being settled against a live profile rather than guessed.
+
+- **`banktransfer` is accepted by `charge()`.** One-off only, like
+  `bancontact`: it mints no mandate, so it cannot back a subscription.
+  - No code changed — `$method` is forwarded as a plain string. The `@param`
+    line listing the methods had fallen a release behind, which for a
+    Cashier-shaped package is the documentation most callers actually read.
+  - **It settles in days, not seconds.** The payer is handed bank details and
+    pays on their own schedule, so Mollie holds the payment `open` for about a
+    fortnight.
+  - The `Checkout` this returns is **not a completed sale**. A pending bank
+    transfer is neither a failure nor something to poll — let your
+    `one_shot_payment.succeeded` / `.failed` listener decide.
+
+- **`tax_behavior` is documented in `charge()`'s options list.** Already
+  forwarded, and already explained in a comment beside the payload; it was
+  just missing from the list callers read.
+
 ## [0.5.0] - 2026-09-22
 
 ### Fixed
@@ -134,5 +166,11 @@ First public release.
   emergency logger rather than turning a logging typo into a 500 on every
   request that touches billing.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-laravel/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-laravel/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/billkit-eu/billkit-laravel/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/billkit-eu/billkit-laravel/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/billkit-eu/billkit-laravel/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/billkit-eu/billkit-laravel/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/billkit-eu/billkit-laravel/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/billkit-eu/billkit-laravel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/billkit-eu/billkit-laravel/releases/tag/v0.1.0
