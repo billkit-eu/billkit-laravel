@@ -183,4 +183,52 @@ final class SubscriptionModelTest extends TestCase
         self::assertSame(1792592000, $fresh->current_period_end?->getTimestamp());
         self::assertTrue($fresh->cancel_at_period_end);
     }
+
+    public function test_sync_leaves_discount_and_payment_method_alone_when_absent(): void
+    {
+        // An API that predates the two fields, or a partial object, must not
+        // wipe what an earlier event stored.
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_keep',
+            'status' => 'active',
+            'coupon_id' => 'co_keep',
+            'payment_method_type' => 'paypal',
+        ]);
+
+        $sub->syncFromApi(['status' => 'past_due']);
+
+        $fresh = $sub->fresh();
+        self::assertSame('co_keep', $fresh->coupon_id);
+        self::assertSame('paypal', $fresh->payment_method_type);
+    }
+
+    public function test_sync_treats_a_malformed_discount_as_none(): void
+    {
+        $sub = Subscription::create([
+            'type' => 'default',
+            'billkit_id' => 'sub_bad_discount',
+            'status' => 'active',
+            'coupon_id' => 'co_old',
+            'discount_ends_at' => now()->addDay(),
+        ]);
+
+        $sub->syncFromApi(['discount' => ['object' => 'discount', 'ends_at' => 1790000000]]);
+
+        $fresh = $sub->fresh();
+        self::assertNull($fresh->coupon_id);
+        self::assertNull($fresh->discount_ends_at);
+    }
+
+    public function test_has_discount_is_false_once_the_window_has_passed(): void
+    {
+        // The coupon_expired webhook clears the columns; until it lands, the
+        // stored end date alone must already answer "no discount".
+        self::assertFalse($this->sub([
+            'coupon_id' => 'co_past',
+            'discount_ends_at' => now()->subMinute(),
+        ])->hasDiscount());
+        self::assertTrue($this->sub(['coupon_id' => 'co_forever'])->hasDiscount());
+        self::assertFalse($this->sub([])->hasDiscount());
+    }
 }

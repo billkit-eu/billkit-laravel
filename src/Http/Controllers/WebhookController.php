@@ -15,7 +15,10 @@ use Symfony\Component\HttpFoundation\Response;
  * Receives verified BillKit webhooks and keeps the local {@see Subscription}
  * rows in sync. Every ``subscription.*`` event carries the full subscription
  * object as its ``data``, so a single generic sync covers create / update /
- * cancel / pause / resume / reactivate / trial / past_due / plan-change.
+ * cancel / pause / resume / reactivate / trial / past_due / plan-change, and
+ * the coupon and payment-method changes (``subscription.coupon_applied``,
+ * ``.coupon_expired``, ``.payment_method_updated``) through the object's
+ * ``discount`` and ``payment_method``.
  *
  * Fires {@see WebhookReceived} and {@see WebhookHandled} so applications can
  * react to any event (e.g. ``invoice.paid``, ``payment.failed``) without

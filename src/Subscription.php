@@ -31,6 +31,13 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $current_period_end
  * @property Carbon|null $trial_ends_at
  * @property Carbon|null $canceled_at
+ * @property string|null $coupon_id
+ * @property Carbon|null $discount_ends_at
+ * @property string|null $payment_method_type
+ * @property string|null $card_brand
+ * @property string|null $card_last_four
+ * @property int|null $card_exp_month
+ * @property int|null $card_exp_year
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
@@ -55,6 +62,9 @@ class Subscription extends Model
             'current_period_end' => 'datetime',
             'trial_ends_at' => 'datetime',
             'canceled_at' => 'datetime',
+            'discount_ends_at' => 'datetime',
+            'card_exp_month' => 'integer',
+            'card_exp_year' => 'integer',
         ];
     }
 
@@ -125,6 +135,81 @@ class Subscription extends Model
     public function ended(): bool
     {
         return $this->canceled() && ! $this->onGracePeriod();
+    }
+
+    // ─── Discount ───────────────────────────────────────────────────
+
+    /**
+     * A coupon is bound and its window has not closed.
+     *
+     * `discount_ends_at` is null for a `forever` coupon, and also for a
+     * `once` or `repeating` coupon until its first discounted charge, since
+     * the window is measured from that charge. Both read as "still applies".
+     * The time check covers a `subscription.coupon_expired` webhook that has
+     * not arrived yet; the webhook itself clears the columns.
+     */
+    public function hasDiscount(): bool
+    {
+        return $this->coupon_id !== null
+            && ($this->discount_ends_at === null || $this->discount_ends_at->isFuture());
+    }
+
+    /** The bound coupon's id, or null. Read the coupon itself through `billkit()->coupons`. */
+    public function couponId(): ?string
+    {
+        return $this->coupon_id;
+    }
+
+    /**
+     * When the discount stops applying (exclusive): a charge dated at or
+     * after it is billed at list price. Null when there is no discount, for a
+     * `forever` coupon, and before the first discounted charge fixes it.
+     */
+    public function discountEndsAt(): ?Carbon
+    {
+        return $this->coupon_id === null ? null : $this->discount_ends_at;
+    }
+
+    // ─── Payment method ─────────────────────────────────────────────
+    //
+    // What the next renewal charges. Kept per subscription rather than on
+    // the billable (Cashier's `pm_type` / `pm_last_four`), because a BillKit
+    // mandate belongs to a subscription.
+
+    /** False only while an imported subscription awaits activation. */
+    public function hasPaymentMethod(): bool
+    {
+        return $this->payment_method_type !== null;
+    }
+
+    /**
+     * The mandate's rail: `creditcard`, `directdebit` (SEPA) or `paypal`.
+     *
+     * Never the checkout method that minted it: an iDEAL or EPS checkout
+     * mints a SEPA mandate, so it reads `directdebit`. Unlike Cashier's
+     * `pm_type` this is never a card brand; that is {@see self::cardBrand()}.
+     */
+    public function paymentMethodType(): ?string
+    {
+        return $this->payment_method_type;
+    }
+
+    /** Renews on a card. The card fields may still be null if the provider did not report them. */
+    public function hasCard(): bool
+    {
+        return $this->payment_method_type === 'creditcard';
+    }
+
+    /** The card's brand as the provider reports it, or null for a non-card mandate. */
+    public function cardBrand(): ?string
+    {
+        return $this->card_brand;
+    }
+
+    /** Cashier's `pm_last_four`: the card's last four digits, or null for a non-card mandate. */
+    public function cardLastFour(): ?string
+    {
+        return $this->card_last_four;
     }
 
     // ─── Actions (delegate to the API, then re-sync) ────────────────
@@ -317,10 +402,58 @@ class Subscription extends Model
             }
         }
 
+        if (array_key_exists('discount', $data)) {
+            $attributes += self::discountAttributes($data['discount']);
+        }
+        if (array_key_exists('payment_method', $data)) {
+            $attributes += self::paymentMethodAttributes($data['payment_method']);
+        }
+
         $this->fill($attributes);
         $this->save();
 
         return $this;
+    }
+
+    /**
+     * The wire `discount` onto its two columns. Anything that is not a
+     * discount object, `null` included, clears both: a coupon that expired
+     * or was removed is sent as `discount: null`.
+     *
+     * @return array{coupon_id: string|null, discount_ends_at: Carbon|null}
+     */
+    private static function discountAttributes(mixed $discount): array
+    {
+        $couponId = is_array($discount) && is_string($discount['coupon_id'] ?? null)
+            ? $discount['coupon_id']
+            : null;
+
+        return [
+            'coupon_id' => $couponId,
+            'discount_ends_at' => $couponId !== null ? self::ts($discount['ends_at'] ?? null) : null,
+        ];
+    }
+
+    /**
+     * The wire `payment_method` onto its five columns. All five are written
+     * every time, so a switch from a card to SEPA clears the card details
+     * rather than leaving the old card's digits next to `directdebit`, and a
+     * `null` (an import awaiting activation) clears everything.
+     *
+     * @return array<string, string|int|null>
+     */
+    private static function paymentMethodAttributes(mixed $method): array
+    {
+        $card = is_array($method) && is_string($method['type'] ?? null) ? $method : [];
+        $type = $card === [] ? null : $card['type'];
+
+        return [
+            'payment_method_type' => $type,
+            'card_brand' => is_string($card['brand'] ?? null) ? $card['brand'] : null,
+            'card_last_four' => is_string($card['last4'] ?? null) ? $card['last4'] : null,
+            'card_exp_month' => is_int($card['exp_month'] ?? null) ? $card['exp_month'] : null,
+            'card_exp_year' => is_int($card['exp_year'] ?? null) ? $card['exp_year'] : null,
+        ];
     }
 
     /** Epoch seconds to a Carbon, or null for anything that is not one. */

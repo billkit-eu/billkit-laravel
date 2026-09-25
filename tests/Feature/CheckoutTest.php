@@ -60,4 +60,32 @@ final class CheckoutTest extends TestCase
         self::assertSame(302, $response->getStatusCode());
         self::assertSame('https://www.mollie.com/checkout/xyz', $response->headers->get('Location'));
     }
+
+    public function test_checkout_forwards_the_buyer_country(): void
+    {
+        // The country is what lets VAT apply to the FIRST charge: on the
+        // hosted flow the buyer only reaches a country-collecting page
+        // after the charge already exists.
+        $this->http->stage(200, ['id' => 'cs_4', 'url' => 'https://www.mollie.com/checkout/nl']);
+
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_nl'])->save();
+
+        $user->checkout('price_1', ['country' => 'NL']);
+
+        $body = $this->http->bodyOf($this->http->requests[0]);
+        self::assertSame('NL', $body['country']);
+    }
+
+    public function test_checkout_omits_the_country_when_not_given(): void
+    {
+        $this->http->stage(200, ['id' => 'cs_5', 'url' => 'https://www.mollie.com/checkout/none']);
+
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_none'])->save();
+
+        $user->checkout('price_1');
+
+        self::assertArrayNotHasKey('country', $this->http->bodyOf($this->http->requests[0]));
+    }
 }

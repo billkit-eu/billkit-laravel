@@ -180,4 +180,172 @@ final class WebhookTest extends TestCase
         self::assertSame('active', $subscription->status);
         self::assertTrue($subscription->current_period_end?->isFuture() ?? false);
     }
+
+    // ── discount + payment_method ────────────────────────────────────
+    //
+    // The three specific events are each paired with a subscription.updated
+    // carrying the same object, and every one of them runs through the same
+    // generic sync. Each test below posts the specific type so a future
+    // narrowing of that sync to named types fails here.
+
+    /**
+     * @param array<string, mixed> $overrides
+     *
+     * @return array<string, mixed>
+     */
+    private function subscriptionObject(string $id, array $overrides = []): array
+    {
+        return array_merge([
+            'id' => $id,
+            'object' => 'subscription',
+            'customer_id' => 'cus_pm',
+            'price_id' => 'price_1',
+            'status' => 'active',
+            'renewal_state' => 'auto_renew',
+            'cancel_at_period_end' => false,
+            'current_period_start' => 1790000000,
+            'current_period_end' => 1792592000,
+            'discount' => null,
+            'payment_method' => null,
+        ], $overrides);
+    }
+
+    private const CARD = [
+        'type' => 'creditcard',
+        'brand' => 'Mastercard',
+        'last4' => '4444',
+        'exp_month' => 12,
+        'exp_year' => 2030,
+    ];
+
+    public function test_created_webhook_mirrors_discount_and_card(): void
+    {
+        $endsAt = now()->addMonths(3)->getTimestamp();
+
+        $this->postWebhook([
+            'type' => 'subscription.created',
+            'data' => $this->subscriptionObject('sub_pm', [
+                'discount' => ['object' => 'discount', 'coupon_id' => 'co_launch', 'ends_at' => $endsAt],
+                'payment_method' => self::CARD,
+            ]),
+        ])->assertOk();
+
+        $sub = Subscription::query()->where('billkit_id', 'sub_pm')->first();
+        self::assertNotNull($sub);
+        self::assertTrue($sub->hasDiscount());
+        self::assertSame('co_launch', $sub->couponId());
+        self::assertSame($endsAt, $sub->discountEndsAt()?->getTimestamp());
+        self::assertTrue($sub->hasPaymentMethod());
+        self::assertTrue($sub->hasCard());
+        self::assertSame('creditcard', $sub->paymentMethodType());
+        self::assertSame('Mastercard', $sub->cardBrand());
+        self::assertSame('4444', $sub->cardLastFour());
+        self::assertSame(12, $sub->card_exp_month);
+        self::assertSame(2030, $sub->card_exp_year);
+    }
+
+    public function test_forever_coupon_has_a_discount_with_no_end(): void
+    {
+        $this->postWebhook([
+            'type' => 'subscription.coupon_applied',
+            'data' => $this->subscriptionObject('sub_forever', [
+                'discount' => ['object' => 'discount', 'coupon_id' => 'co_forever', 'ends_at' => null],
+            ]),
+        ])->assertOk();
+
+        $sub = Subscription::query()->where('billkit_id', 'sub_forever')->first();
+        self::assertNotNull($sub);
+        self::assertTrue($sub->hasDiscount());
+        self::assertNull($sub->discountEndsAt());
+    }
+
+    public function test_coupon_expired_clears_the_discount(): void
+    {
+        Subscription::query()->create([
+            'type' => 'default',
+            'billkit_id' => 'sub_exp',
+            'status' => 'active',
+            'coupon_id' => 'co_launch',
+            'discount_ends_at' => now()->addDay(),
+            'payment_method_type' => 'creditcard',
+            'card_last_four' => '4444',
+        ]);
+
+        $this->postWebhook([
+            'type' => 'subscription.coupon_expired',
+            'data' => $this->subscriptionObject('sub_exp', ['payment_method' => self::CARD]),
+            'previous_attributes' => [
+                'discount' => ['object' => 'discount', 'coupon_id' => 'co_launch', 'ends_at' => 1790000000],
+            ],
+        ])->assertOk();
+
+        $sub = Subscription::query()->where('billkit_id', 'sub_exp')->first();
+        self::assertNotNull($sub);
+        self::assertFalse($sub->hasDiscount());
+        self::assertNull($sub->coupon_id);
+        self::assertNull($sub->discount_ends_at);
+        self::assertNull($sub->discountEndsAt());
+        // The payment method in the same object is untouched by the expiry.
+        self::assertSame('4444', $sub->cardLastFour());
+    }
+
+    public function test_payment_method_updated_to_directdebit_clears_card_fields(): void
+    {
+        Subscription::query()->create([
+            'type' => 'default',
+            'billkit_id' => 'sub_sepa',
+            'status' => 'active',
+            'payment_method_type' => 'creditcard',
+            'card_brand' => 'Mastercard',
+            'card_last_four' => '4444',
+            'card_exp_month' => 12,
+            'card_exp_year' => 2030,
+        ]);
+
+        $this->postWebhook([
+            'type' => 'subscription.payment_method_updated',
+            'data' => $this->subscriptionObject('sub_sepa', [
+                'payment_method' => [
+                    'type' => 'directdebit',
+                    'brand' => null,
+                    'last4' => null,
+                    'exp_month' => null,
+                    'exp_year' => null,
+                ],
+            ]),
+            'previous_attributes' => ['payment_method' => self::CARD],
+        ])->assertOk();
+
+        $sub = Subscription::query()->where('billkit_id', 'sub_sepa')->first();
+        self::assertNotNull($sub);
+        self::assertTrue($sub->hasPaymentMethod());
+        self::assertFalse($sub->hasCard());
+        self::assertSame('directdebit', $sub->paymentMethodType());
+        self::assertNull($sub->cardBrand());
+        self::assertNull($sub->cardLastFour());
+        self::assertNull($sub->card_exp_month);
+        self::assertNull($sub->card_exp_year);
+    }
+
+    public function test_import_awaiting_activation_has_no_payment_method(): void
+    {
+        Subscription::query()->create([
+            'type' => 'default',
+            'billkit_id' => 'sub_import',
+            'status' => 'active',
+            'payment_method_type' => 'creditcard',
+            'card_last_four' => '4444',
+        ]);
+
+        $this->postWebhook([
+            'type' => 'subscription.updated',
+            'data' => $this->subscriptionObject('sub_import', ['payment_method' => null]),
+        ])->assertOk();
+
+        $sub = Subscription::query()->where('billkit_id', 'sub_import')->first();
+        self::assertNotNull($sub);
+        self::assertFalse($sub->hasPaymentMethod());
+        self::assertNull($sub->paymentMethodType());
+        self::assertNull($sub->cardLastFour());
+    }
 }

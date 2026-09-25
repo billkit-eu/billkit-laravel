@@ -8,6 +8,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.8.0] - 2026-09-25
+
+### Upgrading
+- **Run `php artisan migrate`.** This release adds a migration,
+  `2026_09_25_000030_add_discount_and_payment_method_to_billkit_subscriptions_table`,
+  which adds seven nullable columns to `billkit_subscriptions`. The package
+  loads its migrations itself, so `migrate` alone picks it up. If you publish
+  the package's migrations instead, run
+  `php artisan vendor:publish --tag=billkit-migrations` first to copy the new
+  file (files you already published are left alone), then `migrate`.
+- Existing rows start with the new columns empty. They fill on the next
+  `subscription.*` webhook for that subscription, or on the next action verb
+  (`cancel()`, `swap()` and so on), since both re-sync the row.
+
+### Added
+- **The `Subscription` row mirrors the subscription's `discount`.** Columns
+  `coupon_id` and `discount_ends_at` (a datetime), and `hasDiscount()`,
+  `couponId()` and `discountEndsAt()`. `discountEndsAt()` is null for a
+  `forever` coupon, and for a `once` or `repeating` coupon until its first
+  discounted charge fixes the window. `hasDiscount()` also answers false once a
+  stored end date has passed, so it is right before the
+  `subscription.coupon_expired` webhook lands as well as after.
+- **The `Subscription` row mirrors the subscription's `payment_method`.**
+  Columns `payment_method_type` (`creditcard`, `directdebit` or `paypal`),
+  `card_brand`, `card_last_four`, `card_exp_month` and `card_exp_year`, and
+  `hasPaymentMethod()`, `paymentMethodType()`, `hasCard()`, `cardBrand()` and
+  `cardLastFour()`.
+  - It lives on the subscription, not on the billable as Cashier's `pm_type` /
+    `pm_last_four` do, because a BillKit mandate belongs to a subscription: one
+    customer can renew two subscriptions on two different cards.
+  - `payment_method_type` is the mandate's rail, never a card brand (Cashier's
+    `pm_type` holds the brand for a card). An iDEAL or EPS checkout reads
+    `directdebit`, because that is what it mints.
+  - `hasPaymentMethod()` is false only while an imported subscription awaits
+    activation.
+- The webhook controller writes both on every `subscription.*` event, which
+  covers `subscription.coupon_applied`, `subscription.coupon_expired`,
+  `subscription.payment_method_updated` and the `subscription.updated` each is
+  paired with. A `null` clears the columns: an expired coupon empties both
+  discount columns, and a switch from a card to SEPA clears every card field
+  rather than leaving the old card's digits next to `directdebit`. A payload
+  that does not mention either field leaves them as they are.
+
+## [0.7.0] - 2026-09-23
+
+### Added
+- **`checkout()` takes a `country` option** and forwards it to the checkout
+  session. It is what lets VAT apply to the **first** charge: on the hosted
+  flow the buyer only reaches a country-collecting page after the charge
+  exists. Stored on the customer when they have no country yet, and never
+  overwrites one they do.
+- `AGENTS.md` and the README now name the PHP SDK surface a Laravel app reaches
+  through `billkit()` without a wrapper here: `apiKeys`,
+  `invoices->sendEmail()`, `payments->retrieveProvider()`,
+  `tenant->billingProfile()` / `setBillingProfile()` / `export()`,
+  `webhookEndpoints->listEventTypes()`, and `expand` on the list and retrieve
+  routes.
+
+### Changed
+- **Requires `billkit-eu/billkit-php` `>=0.7.0 <1`**, up from `>=0.4.0`. The
+  lower bound is raised by hand because `check_sibling_range()` cannot see that
+  a range is too *loose*: an install could otherwise satisfy the old constraint
+  and still lack what the docs above point at.
+
 ## [0.6.0] - 2026-09-23
 
 ### Added

@@ -52,12 +52,18 @@ return $request->user()->checkout('price_pro_monthly', [
     'cancel_url'  => route('pricing'),
     'trial_days'  => 14,        // optional per-checkout trial override
     'coupon_code' => 'LAUNCH',  // optional
+    'country'     => 'NL',      // optional, but see below
 ]);
 ```
 
 The buyer is redirected to the hosted Mollie checkout. When they finish, BillKit
 sends `subscription.created`; the package's webhook controller creates the local
 `Subscription` and links it to the billable by customer id.
+
+Pass `country` whenever your app already knows where the buyer is. It is what
+lets VAT apply to the **first** charge: on the hosted flow the buyer only
+reaches a country-collecting page after the charge exists. It is stored on the
+customer when they have no country yet, and never overwrites one they do.
 
 Catalog work has no Cashier-shaped equivalent, so reach for the underlying PHP
 client through the `billkit()` helper. Retiring a price, for example, is an
@@ -128,6 +134,40 @@ $sub->paused();
 return redirect($sub->updatePaymentMethod(route('billing')));
 return $sub->redirectToBillingPortal(route('billing'));
 ```
+
+## Discounts and the payment method
+
+The `Subscription` row mirrors the subscription's coupon and the payment method
+its next renewal charges, kept current by the webhook like every other column.
+
+```php
+$sub = $user->subscription();
+
+$sub->hasDiscount();        // a coupon is bound and its window has not closed
+$sub->couponId();           // 'co_...' or null
+$sub->discountEndsAt();     // Carbon, or null for a forever coupon
+
+$sub->hasPaymentMethod();   // false only while an import awaits activation
+$sub->paymentMethodType();  // 'creditcard', 'directdebit' (SEPA) or 'paypal'
+$sub->hasCard();
+$sub->cardBrand();          // null for a non-card mandate
+$sub->cardLastFour();       // Cashier's pm_last_four
+$sub->card_exp_month;       // int|null
+$sub->card_exp_year;        // int|null
+```
+
+Two differences from Cashier are deliberate:
+
+- **It is on the subscription, not the billable.** A BillKit mandate belongs to
+  a subscription, so one customer can renew two subscriptions on two cards.
+- **`paymentMethodType()` is the rail, never a card brand.** Cashier's
+  `pm_type` holds the brand for a card; here the brand is `cardBrand()`. An
+  iDEAL or EPS checkout reads `directdebit`, because that is the mandate it
+  mints.
+
+`discountEndsAt()` is also null for a `once` or `repeating` coupon until its
+first discounted charge, since the window is measured from that charge. To send
+the customer somewhere to change their card, use `updatePaymentMethod()` above.
 
 ## Metered usage
 

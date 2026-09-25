@@ -120,6 +120,12 @@ final class IntegrationTest extends IntegrationTestCase
         self::assertTrue($subscription->valid());
         self::assertFalse($subscription->canceled());
         self::assertNotNull($subscription->current_period_end);
+
+        // The real wire object, not a hand-built one: the settled checkout
+        // bound a mandate, so its rail is mirrored, and no coupon was used.
+        self::assertTrue($subscription->hasPaymentMethod());
+        self::assertContains($subscription->paymentMethodType(), ['creditcard', 'directdebit', 'paypal']);
+        self::assertFalse($subscription->hasDiscount());
     }
 
     public function testLaravelSubscriptionActions(): void

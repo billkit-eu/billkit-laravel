@@ -16,7 +16,7 @@
     "require": {
         "php": ">=8.2",
         "ext-json": "*",
-        "billkit-eu/billkit-php": ">=0.4.0 <1",
+        "billkit-eu/billkit-php": ">=0.7.0 <1",
         "illuminate/config": "^11.0|^12.0",
         "illuminate/contracts": "^11.0|^12.0",
         "illuminate/database": "^11.0|^12.0",

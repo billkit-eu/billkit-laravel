@@ -129,8 +129,14 @@ trait Billable
      *
      * Options: ``success_url``, ``cancel_url`` (else config defaults),
      * ``trial_days``, ``coupon_code``, ``method`` (creditcard|directdebit|ideal|eps|applepay|paypal),
-     * ``ui_mode``, plus ``email``/``name``/``metadata`` used when creating the
-     * customer.
+     * ``ui_mode``, ``country``, plus ``email``/``name``/``metadata`` used when
+     * creating the customer.
+     *
+     * ``country`` is the buyer's ISO-3166-1 alpha-2 code, and it is worth
+     * passing whenever your app already knows it: it is what lets VAT apply
+     * to the **first** charge, because on the hosted flow the buyer only
+     * reaches a country-collecting page after the charge exists. It never
+     * overwrites a country the customer already has.
      *
      * @param array<string, mixed> $options
      */
@@ -147,6 +153,7 @@ trait Billable
             'coupon_code' => $options['coupon_code'] ?? null,
             'method' => $options['method'] ?? null,
             'ui_mode' => $options['ui_mode'] ?? null,
+            'country' => $options['country'] ?? null,
         ], static fn ($v): bool => $v !== null);
 
         return new Checkout($this->billkitClient()->checkoutSessions->create($payload));
