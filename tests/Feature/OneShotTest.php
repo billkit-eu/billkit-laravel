@@ -44,6 +44,58 @@ final class OneShotTest extends TestCase
         self::assertSame('A single widget', $body['description']);
     }
 
+    public function test_charge_embedded_sends_ui_mode_without_method_and_returns_the_secret(): void
+    {
+        $this->http
+            ->stage(200, ['id' => 'cus_1', 'object' => 'customer'])
+            ->stage(200, [
+                'id' => 'osp_e',
+                'object' => 'one_shot_payment',
+                'ui_mode' => 'embedded',
+                'method' => null,
+                'redirect_url' => null,
+                'client_secret' => 'osp_e_secret_abc',
+            ]);
+
+        $user = $this->makeUser();
+        $payment = $user->chargeEmbedded(1999, 'EUR', [
+            'success_url' => 'https://app.test/ok',
+            'metadata' => ['order_id' => '7'],
+        ]);
+
+        self::assertSame('osp_e_secret_abc', $payment['client_secret']);
+        self::assertNull($payment['redirect_url']);
+        self::assertSame('cus_1', $user->fresh()?->billkit_customer_id);
+
+        $customerBody = $this->http->bodyOf($this->http->requests[0]);
+        self::assertArrayNotHasKey('metadata', $customerBody);
+
+        $body = $this->http->bodyOf($this->http->requests[1]);
+        self::assertSame('embedded', $body['ui_mode']);
+        self::assertArrayNotHasKey('method', $body);
+        self::assertSame(1999, $body['amount_cents']);
+        self::assertSame('EUR', $body['currency']);
+        self::assertSame('https://app.test/ok', $body['success_url']);
+        self::assertSame(['order_id' => '7'], $body['metadata']);
+    }
+
+    public function test_hosted_charge_never_sends_ui_mode(): void
+    {
+        $this->http->stage(200, [
+            'id' => 'osp_h',
+            'object' => 'one_shot_payment',
+            'redirect_url' => 'https://www.mollie.com/checkout/one/h',
+        ]);
+
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_x'])->save();
+        $user->charge(1000, 'EUR', 'creditcard', ['success_url' => 'https://app.test/ok']);
+
+        $body = $this->http->bodyOf($this->http->requests[0]);
+        self::assertSame('creditcard', $body['method']);
+        self::assertArrayNotHasKey('ui_mode', $body);
+    }
+
     public function test_charge_keeps_metadata_on_payment_not_customer(): void
     {
         // metadata is payment-scoped (PaymentIntent semantics); it must reach

@@ -197,9 +197,60 @@ trait Billable
      */
     public function charge(int $amountCents, string $currency, string $method, array $options = []): Checkout
     {
+        $payload = $this->oneShotPayload($amountCents, $currency, $options, ['method' => $method]);
+
+        return new Checkout($this->billkitClient()->oneShotPayments->create($payload));
+    }
+
+    /**
+     * Start a one-off charge the buyer pays inside your own page, and return
+     * the one-shot payment array carrying its ``client_secret``.
+     *
+     * The embedded sibling of {@see self::charge()}. There is no ``$method``:
+     * the buyer picks it in the BillKit payment element, which you mount in
+     * the browser with ``client_secret`` (``mountOneShotPaymentElement`` in
+     * ``@billkit-eu/js``, or ``<OneShotPaymentElement/>`` in
+     * ``@billkit-eu/react``). Hand the browser the secret and nothing else.
+     *
+     * It returns the array rather than a {@see Checkout}, because there is
+     * nothing to redirect to: ``redirect_url`` is null, ``method`` stays null
+     * until the buyer confirms, and ``expires_at`` says when the secret and the
+     * unconfirmed charge lapse. The secret is only on this response; reading
+     * the one-shot back later returns it as null. Terminal state arrives via
+     * the same ``one_shot_payment.succeeded`` / ``one_shot_payment.failed``
+     * webhooks as a hosted charge, and {@see self::refundOneShot()} refunds it.
+     *
+     * Options are those of {@see self::charge()}. ``success_url`` is still
+     * needed: a card that asks for 3-D Secure or a bank redirect leaves the
+     * page and comes back to it.
+     *
+     * @param int    $amountCents amount to charge, in the currency's minor unit
+     * @param string $currency    ISO-4217 code, e.g. ``EUR``
+     * @param array<string, mixed> $options
+     *
+     * @return array<string, mixed>
+     */
+    public function chargeEmbedded(int $amountCents, string $currency, array $options = []): array
+    {
+        $payload = $this->oneShotPayload($amountCents, $currency, $options, ['ui_mode' => 'embedded']);
+
+        return $this->billkitClient()->oneShotPayments->create($payload);
+    }
+
+    /**
+     * The ``POST /v1/checkout/one_shot`` body shared by {@see self::charge()}
+     * and {@see self::chargeEmbedded()}, which differ only in ``$mode``.
+     *
+     * @param array<string, mixed> $options
+     * @param array<string, string> $mode either ``method`` (hosted) or ``ui_mode`` (embedded)
+     *
+     * @return array<string, mixed>
+     */
+    private function oneShotPayload(int $amountCents, string $currency, array $options, array $mode): array
+    {
         $config = $this->billkitConfig();
 
-        $payload = array_filter([
+        return array_filter([
             // ``metadata`` is payment-scoped (PaymentIntent semantics), so it is
             // kept out of customer creation, otherwise the same bag would leak
             // onto a newly-created customer record.
@@ -208,7 +259,7 @@ trait Billable
             ),
             'amount_cents' => $amountCents,
             'currency' => $currency,
-            'method' => $method,
+            ...$mode,
             'success_url' => $options['success_url'] ?? ($config['success_url'] ?? null),
             'cancel_url' => $options['cancel_url'] ?? ($config['cancel_url'] ?? null),
             'description' => $options['description'] ?? null,
@@ -220,8 +271,6 @@ trait Billable
             'tax_behavior' => $options['tax_behavior'] ?? null,
             'metadata' => $options['metadata'] ?? null,
         ], static fn ($v): bool => $v !== null);
-
-        return new Checkout($this->billkitClient()->oneShotPayments->create($payload));
     }
 
     /**

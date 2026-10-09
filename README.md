@@ -94,6 +94,22 @@ The buyer completes the payment on the hosted Mollie page. The charge reaches a
 terminal state via the `one_shot_payment.succeeded` / `one_shot_payment.failed`
 webhooks, so react to them like any other event.
 
+To take the payment inside your own page instead, use `chargeEmbedded()`. It
+takes no method (the buyer picks it in the BillKit payment element) and returns
+the one-shot array with a short-lived `client_secret`, which is the only thing
+you hand to the browser for `@billkit-eu/js` or `@billkit-eu/react`:
+
+```php
+$payment = $request->user()->chargeEmbedded(1999, 'EUR', [
+    'success_url' => route('thanks'), // where 3-D Secure and bank redirects return
+    'description' => 'One premium widget',
+]);
+
+return view('pay', ['clientSecret' => $payment['client_secret']]);
+```
+
+The same webhooks settle it, and `refundOneShot()` refunds it.
+
 Refund a settled one-shot (within its `refund_window_days`):
 
 ```php

@@ -26,6 +26,7 @@ final class IntegrationTest extends IntegrationTestCase
     private const COVERED = [
         'laravel.customer',
         'laravel.checkout',
+        'laravel.charge_embedded',
         'laravel.subscription_sync',
         'laravel.subscription_actions',
         'laravel.paused_state',
@@ -109,6 +110,21 @@ final class IntegrationTest extends IntegrationTestCase
         // that sets them once in config should not have to repeat them.
         self::assertIsString($checkout->url());
         self::assertStringContainsString('mollie.com', (string) $checkout->url());
+    }
+
+    public function testLaravelChargeEmbedded(): void
+    {
+        $user = $this->makeUser();
+
+        $payment = $user->chargeEmbedded(2500, 'EUR');
+
+        self::assertStringStartsWith('osp_', $payment['id']);
+        self::assertSame('embedded', $payment['ui_mode']);
+        self::assertNull($payment['redirect_url']);
+        self::assertNull($payment['method']);
+        self::assertIsString($payment['client_secret']);
+        self::assertStringStartsWith($payment['id'] . '_secret_', $payment['client_secret']);
+        self::assertSame($user->billkitId(), $payment['customer_id']);
     }
 
     public function testLaravelSubscriptionSync(): void

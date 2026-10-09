@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versioned independently of the other SDKs; requires `billkit-eu/billkit-php`.
 
+## [0.9.0] - 2026-10-09
+
+### Added
+- `Billable::chargeEmbedded(int $amountCents, string $currency, array $options = []): array`, the embedded sibling of `charge()`. It creates a one-shot with `ui_mode: embedded` and no method (the buyer picks it in the BillKit payment element) and returns the one-shot array with its `client_secret` for `@billkit-eu/js` / `@billkit-eu/react`, rather than a redirect `Checkout`, because there is nothing to redirect to. Options, customer creation, webhooks and `refundOneShot()` work as for `charge()`, which is unchanged. **Requires the matching API release.**
+
 ## [0.8.0] - 2026-09-25
 
 ### Upgrading
