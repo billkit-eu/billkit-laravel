@@ -30,10 +30,12 @@ final class LoggingTest extends TestCase
      */
     private function clientFromServiceProvider(): BillKitClient
     {
-        $this->app->forgetInstance(BillKitClient::class);
-        (new BillKitServiceProvider($this->app))->register();
+        $app = $this->app;
+        self::assertNotNull($app);
+        $app->forgetInstance(BillKitClient::class);
+        (new BillKitServiceProvider($app))->register();
 
-        return $this->app->make(BillKitClient::class);
+        return $app->make(BillKitClient::class);
     }
 
     /** Reach the transport's private logger; it has no accessor by design. */
@@ -41,7 +43,9 @@ final class LoggingTest extends TestCase
     {
         $property = new \ReflectionProperty(Transport::class, 'logger');
 
-        $logger = $property->getValue($client->transport);
+        $transport = (new \ReflectionProperty(BillKitClient::class, 'transport'))->getValue($client);
+        self::assertInstanceOf(Transport::class, $transport);
+        $logger = $property->getValue($transport);
         self::assertInstanceOf(LoggerInterface::class, $logger);
 
         return $logger;
@@ -87,7 +91,7 @@ final class LoggingTest extends TestCase
     public function test_an_undefined_channel_degrades_to_silence_not_the_emergency_logger(): void
     {
         // The real hazard: Log::channel() does NOT throw for an unknown
-        // name — LogManager catches the failure and returns its emergency
+        // name, LogManager catches the failure and returns its emergency
         // logger, a `single` file handler at `debug`. So the old try/catch
         // never fired and a typo'd BILLKIT_LOG_CHANNEL switched the SDK's
         // full request lifecycle ON, at the most verbose level, into a file
@@ -108,7 +112,7 @@ final class LoggingTest extends TestCase
             ->withArgs(static fn (string $message): bool => str_contains($message, 'billkit_typo')
                 && str_contains($message, 'BILLKIT_LOG_CHANNEL'));
         // The facade is mocked wholesale, so `channel()` must stay unused
-        // on this path — which is exactly the assertion.
+        // on this path, which is exactly the assertion.
         Log::shouldReceive('channel')->never();
 
         $this->clientFromServiceProvider();

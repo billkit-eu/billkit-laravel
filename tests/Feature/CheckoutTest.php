@@ -13,7 +13,7 @@ final class CheckoutTest extends TestCase
     {
         $this->http
             ->stage(200, ['id' => 'cus_1', 'object' => 'customer'])
-            ->stage(200, ['id' => 'cs_1', 'object' => 'checkout_session', 'url' => 'https://www.mollie.com/checkout/abc']);
+            ->stage(200, ['id' => 'cs_1', 'object' => 'checkout.session', 'url' => 'https://www.mollie.com/checkout/abc']);
 
         $user = $this->makeUser();
         $checkout = $user->checkout('price_1', [
@@ -87,5 +87,119 @@ final class CheckoutTest extends TestCase
         $user->checkout('price_1');
 
         self::assertArrayNotHasKey('country', $this->http->bodyOf($this->http->requests[0]));
+    }
+
+    public function test_trial_days_is_sent_as_the_api_field(): void
+    {
+        $this->http->stage(200, ['id' => 'cs_t', 'url' => 'https://www.mollie.com/checkout/t']);
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_1'])->save();
+
+        $user->checkout('price_1', ['trial_days' => 14, 'success_url' => 'https://app.test/ok', 'cancel_url' => 'https://app.test/no']);
+
+        $body = $this->http->bodyOf($this->http->lastRequest());
+        self::assertSame(14, $body['trial_days_override']);
+        self::assertArrayNotHasKey('trial_days', $body);
+    }
+
+    /**
+     * One spelling only. 0.x took both and silently preferred one, so a
+     * typo'd key and a correct one could disagree about the trial.
+     */
+    public function test_the_api_spelling_of_the_trial_is_refused(): void
+    {
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_1'])->save();
+
+        try {
+            $user->checkout('price_1', ['trial_days_override' => 14]);
+            self::fail('expected \InvalidArgumentException');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('trial_days', $e->getMessage());
+        }
+        self::assertSame([], $this->http->requests);
+    }
+
+    public function test_payment_method_is_sent_under_its_api_name(): void
+    {
+        $this->http->stage(200, ['id' => 'cs_m', 'url' => 'https://www.mollie.com/checkout/m']);
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_1'])->save();
+
+        $user->checkout('price_1', ['payment_method' => 'ideal', 'success_url' => 'https://app.test/ok', 'cancel_url' => 'https://app.test/no']);
+
+        $body = $this->http->bodyOf($this->http->lastRequest());
+        self::assertSame('ideal', $body['payment_method']);
+        self::assertArrayNotHasKey('method', $body);
+    }
+
+    /**
+     * The 0.x option name is refused, not dropped: dropping it would let the
+     * buyer pick any method, a different checkout from the one asked for.
+     */
+    public function test_the_0x_method_option_is_refused(): void
+    {
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_1'])->save();
+
+        try {
+            $user->checkout('price_1', ['method' => 'ideal']);
+            self::fail('expected \InvalidArgumentException');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('payment_method', $e->getMessage());
+        }
+        self::assertSame([], $this->http->requests);
+    }
+
+    public function test_charge_is_now_checkout_charge(): void
+    {
+        $user = new \ReflectionClass(\BillKit\Laravel\Tests\Fixtures\User::class);
+
+        self::assertFalse($user->hasMethod('charge'));
+        self::assertFalse($user->hasMethod('chargeEmbedded'));
+        self::assertTrue($user->hasMethod('checkoutCharge'));
+        self::assertTrue($user->hasMethod('checkoutChargeEmbedded'));
+    }
+
+    public function test_checkout_sends_metadata_to_the_session_and_not_the_customer(): void
+    {
+        $this->http
+            ->stage(200, ['id' => 'cus_m', 'object' => 'customer'])
+            ->stage(200, ['id' => 'cs_m', 'url' => 'https://www.mollie.com/checkout/m']);
+
+        $user = $this->makeUser();
+        $user->checkout('price_1', [
+            'success_url' => 'https://app.test/ok',
+            'cancel_url' => 'https://app.test/no',
+            'metadata' => ['order_id' => 'ord_42'],
+        ]);
+
+        self::assertArrayNotHasKey('metadata', $this->http->bodyOf($this->http->requests[0]));
+        self::assertSame(['order_id' => 'ord_42'], $this->http->bodyOf($this->http->requests[1])['metadata']);
+    }
+
+    public function test_return_urls_may_be_route_names(): void
+    {
+        \Illuminate\Support\Facades\Route::get('/billing/done', static fn () => 'ok')->name('billing.done');
+        \Illuminate\Support\Facades\Route::get('/billing/back', static fn () => 'back')->name('billing.back');
+        \Illuminate\Support\Facades\Route::getRoutes()->refreshNameLookups();
+        config(['billkit.cancel_url' => 'billing.back']);
+        $this->http
+            ->stage(200, ['id' => 'cs_r', 'url' => 'https://www.mollie.com/checkout/r'])
+            ->stage(200, ['id' => 'osp_r', 'redirect_url' => 'https://www.mollie.com/checkout/o']);
+
+        $user = $this->makeUser();
+        $user->forceFill(['billkit_customer_id' => 'cus_r'])->save();
+        $user->checkout('price_1', ['success_url' => 'billing.done']);
+        $user->checkoutCharge(500, 'EUR', 'ideal', ['success_url' => 'https://app.test/absolute']);
+
+        $session = $this->http->bodyOf($this->http->requests[0]);
+        self::assertSame(route('billing.done'), $session['success_url']);
+        self::assertStringStartsWith('http', $session['success_url']);
+        self::assertSame(route('billing.back'), $session['cancel_url']);
+
+        $oneShot = $this->http->bodyOf($this->http->requests[1]);
+        self::assertSame('https://app.test/absolute', $oneShot['success_url']);
+        self::assertSame(route('billing.back'), $oneShot['cancel_url']);
     }
 }

@@ -34,7 +34,11 @@ final class SubscriptionModelTest extends TestCase
         // A paused subscription is still entitled: the customer paid for
         // the period they are in, and only the renewal is off.
         self::assertTrue(
-            $this->sub(['status' => 'active', 'renewal_state' => 'paused'])->valid(),
+            $this->sub([
+                'status' => 'active',
+                'renewal_state' => 'paused',
+                'current_period_end' => now()->addDay(),
+            ])->valid(),
         );
     }
 
@@ -64,17 +68,116 @@ final class SubscriptionModelTest extends TestCase
         ])->onGracePeriod());
     }
 
-    public function test_canceled_within_grace_is_still_valid_but_not_ended(): void
+    public function test_canceling_within_the_paid_period_is_valid(): void
     {
-        $graceful = $this->sub([
-            'status' => 'canceled',
+        // BillKit's cancel-at-period-end shape: `status` stays `active` and
+        // `renewal_state` says no renewal is coming.
+        $canceling = $this->sub([
+            'status' => 'active',
+            'renewal_state' => 'canceling',
+            'serves_customer' => true,
             'cancel_at_period_end' => true,
             'current_period_end' => now()->addDay(),
         ]);
-        self::assertTrue($graceful->canceled());
-        self::assertTrue($graceful->onGracePeriod());
-        self::assertTrue($graceful->valid());
-        self::assertFalse($graceful->ended());
+        self::assertTrue($canceling->onGracePeriod());
+        self::assertTrue($canceling->valid());
+        // Cashier's meaning: cancelled, on its grace period, not ended.
+        self::assertTrue($canceling->canceled());
+        self::assertFalse($canceling->ended());
+    }
+
+    public function test_canceled_is_never_on_a_grace_period(): void
+    {
+        // An immediate cancel overtaking a scheduled one leaves
+        // cancel_at_period_end set beside a future period end. The API
+        // treats `canceled` as terminal, so Cashier's
+        // `subscribed() || onGracePeriod()` must not grant it either.
+        $canceled = $this->sub([
+            'status' => 'canceled',
+            'renewal_state' => 'stopped',
+            'serves_customer' => false,
+            'cancel_at_period_end' => true,
+            'canceled_at' => now()->subMinute(),
+            'current_period_end' => now()->addWeek(),
+        ]);
+        self::assertFalse($canceled->onGracePeriod());
+        self::assertFalse($canceled->valid());
+        self::assertTrue($canceled->canceled());
+        self::assertTrue($canceled->ended());
+
+        // The status alone is enough, for a row synced without canceled_at.
+        self::assertFalse($this->sub([
+            'status' => 'canceled',
+            'cancel_at_period_end' => true,
+            'current_period_end' => now()->addWeek(),
+        ])->onGracePeriod());
+    }
+
+    public function test_a_renewing_subscription_is_not_canceled(): void
+    {
+        $active = $this->sub([
+            'status' => 'active',
+            'renewal_state' => 'auto_renew',
+            'cancel_at_period_end' => false,
+            'current_period_end' => now()->addWeek(),
+        ]);
+        self::assertFalse($active->canceled());
+        self::assertFalse($active->onGracePeriod());
+        self::assertFalse($active->ended());
+    }
+
+    public function test_canceled_is_never_valid_even_inside_the_period(): void
+    {
+        // `canceled` is terminal in the API: serves_customer is false for it
+        // whatever the period says. This used to answer true through
+        // onGracePeriod(), serving a customer the API had cut off.
+        foreach ([null, false] as $served) {
+            self::assertFalse($this->sub([
+                'status' => 'canceled',
+                'serves_customer' => $served,
+                'cancel_at_period_end' => true,
+                'current_period_end' => now()->addDay(),
+            ])->valid(), var_export($served, true));
+        }
+    }
+
+    public function test_valid_follows_serves_customer_over_status(): void
+    {
+        self::assertFalse($this->sub([
+            'status' => 'active',
+            'renewal_state' => 'auto_renew',
+            'serves_customer' => false,
+        ])->valid());
+    }
+
+    public function test_a_non_renewing_snapshot_expires_at_period_end(): void
+    {
+        // serves_customer was true when the row was synced, but nothing is
+        // renewing and the paid period is over: the API now answers false
+        // and no event marks the moment, so the row must not keep serving.
+        foreach (['canceling', 'paused', 'stopped'] as $state) {
+            self::assertFalse($this->sub([
+                'status' => 'active',
+                'renewal_state' => $state,
+                'serves_customer' => true,
+                'current_period_end' => now()->subMinute(),
+            ])->valid(), $state);
+            self::assertFalse($this->sub([
+                'status' => 'active',
+                'renewal_state' => $state,
+                'serves_customer' => true,
+                'current_period_end' => null,
+            ])->valid(), $state . ' without a period end');
+        }
+
+        // A renewing subscription is not held to its period end: the renewal
+        // is charged in a short gap after it, and that is not a lapse.
+        self::assertTrue($this->sub([
+            'status' => 'active',
+            'renewal_state' => 'auto_renew',
+            'serves_customer' => true,
+            'current_period_end' => now()->subMinute(),
+        ])->valid());
     }
 
     public function test_ended_when_canceled_and_past_period(): void
@@ -122,8 +225,10 @@ final class SubscriptionModelTest extends TestCase
 
         $sub->syncFromApi(['status' => 'active', 'trial_end' => null]);
 
-        self::assertNull($sub->fresh()->trial_ends_at);
-        self::assertSame('active', $sub->fresh()->status);
+        $fresh = $sub->fresh();
+        self::assertNotNull($fresh);
+        self::assertNull($fresh->trial_ends_at);
+        self::assertSame('active', $fresh->status);
     }
 
     public function test_sync_leaves_an_absent_key_alone(): void
@@ -142,6 +247,8 @@ final class SubscriptionModelTest extends TestCase
         $sub->syncFromApi(['status' => 'active']);
 
         $fresh = $sub->fresh();
+
+        self::assertNotNull($fresh);
         self::assertSame('price_1', $fresh->price_id);
         self::assertNotNull($fresh->trial_ends_at);
         self::assertTrue($trialEnd->equalTo($fresh->trial_ends_at));
@@ -160,8 +267,10 @@ final class SubscriptionModelTest extends TestCase
 
         $sub->syncFromApi(['status' => 123, 'renewal_state' => 'paused']);
 
-        self::assertSame('active', $sub->fresh()->status);
-        self::assertSame('paused', $sub->fresh()->renewal_state);
+        $fresh = $sub->fresh();
+        self::assertNotNull($fresh);
+        self::assertSame('active', $fresh->status);
+        self::assertSame('paused', $fresh->renewal_state);
     }
 
     public function test_sync_casts_epoch_timestamps(): void
@@ -179,6 +288,8 @@ final class SubscriptionModelTest extends TestCase
         ]);
 
         $fresh = $sub->fresh();
+
+        self::assertNotNull($fresh);
         self::assertSame(1790000000, $fresh->current_period_start?->getTimestamp());
         self::assertSame(1792592000, $fresh->current_period_end?->getTimestamp());
         self::assertTrue($fresh->cancel_at_period_end);
@@ -199,6 +310,8 @@ final class SubscriptionModelTest extends TestCase
         $sub->syncFromApi(['status' => 'past_due']);
 
         $fresh = $sub->fresh();
+
+        self::assertNotNull($fresh);
         self::assertSame('co_keep', $fresh->coupon_id);
         self::assertSame('paypal', $fresh->payment_method_type);
     }
@@ -216,6 +329,8 @@ final class SubscriptionModelTest extends TestCase
         $sub->syncFromApi(['discount' => ['object' => 'discount', 'ends_at' => 1790000000]]);
 
         $fresh = $sub->fresh();
+
+        self::assertNotNull($fresh);
         self::assertNull($fresh->coupon_id);
         self::assertNull($fresh->discount_ends_at);
     }

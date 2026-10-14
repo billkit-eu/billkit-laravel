@@ -8,6 +8,7 @@ use BillKit\BillKitClient;
 use BillKit\Laravel\Http\Controllers\WebhookController;
 use BillKit\Laravel\Http\Middleware\VerifyWebhookSignature;
 use Illuminate\Contracts\Config\Repository;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
@@ -19,15 +20,17 @@ final class BillKitServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__ . '/../config/billkit.php', 'billkit');
 
-        $this->app->singleton(BillKitClient::class, static function ($app): BillKitClient {
-            $config = $app['config']->get('billkit', []);
+        $this->app->singleton(BillKitClient::class, static function (Application $app): BillKitClient {
+            $repository = $app->make(Repository::class);
+            $config = $repository->get('billkit', []);
+            $config = is_array($config) ? $config : [];
             $apiKey = $config['api_key'] ?? null;
             $baseUrl = $config['base_url'] ?? null;
 
             return new BillKitClient(
                 apiKey: is_string($apiKey) && $apiKey !== '' ? $apiKey : null,
                 baseUrl: is_string($baseUrl) && $baseUrl !== '' ? $baseUrl : null,
-                logger: self::resolveLogger($config['log_channel'] ?? null, $app['config']),
+                logger: self::resolveLogger($config['log_channel'] ?? null, $repository),
             );
         });
     }
@@ -38,14 +41,14 @@ final class BillKitServiceProvider extends ServiceProvider
      * Returns ``null`` (meaning the SDK stays silent) unless the app
      * names a channel that actually exists. Opting an application into
      * log output is its own decision to make, not something a package
-     * should do on install — and neither is *where* that output lands.
+     * should do on install, and neither is *where* that output lands.
      *
      * The channel is checked against ``config/logging.php`` rather than
      * left to ``Log::channel()``, because ``Log::channel()`` does not
      * throw for an unknown name: Laravel's ``LogManager`` catches the
      * resolution failure and hands back its **emergency logger**, a
      * `single` file handler at `debug`. So a typo'd ``BILLKIT_LOG_CHANNEL``
-     * did the one thing this method exists to prevent — it switched
+     * did the one thing this method exists to prevent: it switched
      * logging on, at the most verbose level, into a file the app never
      * nominated, appending a line per HTTP attempt for every billing
      * call. The try/catch below is kept as a belt-and-braces guard for
@@ -101,7 +104,7 @@ final class BillKitServiceProvider extends ServiceProvider
      */
     private function registerWebhookRoute(): void
     {
-        $path = $this->app['config']->get('billkit.path');
+        $path = $this->app->make(Repository::class)->get('billkit.path');
         if (! is_string($path) || $path === '') {
             return;
         }

@@ -53,7 +53,12 @@ final class FakeHttpClient implements ClientInterface
 
     public function lastRequest(): RequestInterface
     {
-        return $this->requests[array_key_last($this->requests)];
+        $last = array_key_last($this->requests);
+        if ($last === null) {
+            throw new \RuntimeException('FakeHttpClient: no requests captured yet.');
+        }
+
+        return $this->requests[$last];
     }
 
     /**
@@ -62,7 +67,11 @@ final class FakeHttpClient implements ClientInterface
     public function bodyOf(RequestInterface $request): array
     {
         $decoded = json_decode((string) $request->getBody(), true);
+        $out = [];
+        foreach (is_array($decoded) ? $decoded : [] as $key => $value) {
+            $out[(string) $key] = $value;
+        }
 
-        return is_array($decoded) ? $decoded : [];
+        return $out;
     }
 }

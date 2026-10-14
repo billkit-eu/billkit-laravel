@@ -9,8 +9,13 @@ Cashier-shaped billing layer on top of the `billkit-eu/billkit-php` PHP SDK.
 - Signature-verified webhook controller wired out of the box
 
 BillKit provisions subscriptions from the inbound Mollie webhook (there is no
-synchronous "create subscription" call), so the flow is **checkout → redirect →
-your webhook creates the local `Subscription`**, exactly the Cashier model.
+synchronous "create subscription" call), so the flow is **checkout, redirect,
+then your webhook creates the local `Subscription`**, exactly the Cashier model.
+
+Requires PHP 8.2+ with the `curl` extension, and Laravel 12 or 13 (Laravel 13
+itself needs PHP 8.3).
+Upgrading from 0.x? [CHANGELOG.md](CHANGELOG.md) has the "Upgrading from 0.x"
+list, and the PHP SDK it builds on changed too.
 
 ## Install
 
@@ -50,11 +55,27 @@ class User extends Authenticatable
 return $request->user()->checkout('price_pro_monthly', [
     'success_url' => route('billing.done'),
     'cancel_url'  => route('pricing'),
-    'trial_days'  => 14,        // optional per-checkout trial override
+    'trial_days'  => 14,        // optional per-checkout trial override (the only trial key)
     'coupon_code' => 'LAUNCH',  // optional
     'country'     => 'NL',      // optional, but see below
+    'metadata'    => ['order_id' => $order->id], // optional, echoed on the session
+    // 'payment_method' => 'ideal', // optional: pin the method; omit to let the buyer pick
 ]);
 ```
+
+`success_url` and `cancel_url` may also be route names (`'billing.done'`),
+here or as the `BILLKIT_SUCCESS_URL` / `BILLKIT_CANCEL_URL` defaults; a name
+that matches a registered route is resolved with `route()`. `metadata` goes on
+the checkout session, as in Cashier, and comes back on the session and on the
+`checkout.session.completed` event, so a completed checkout can be joined back
+to your own order. It is not copied onto the customer.
+
+Option names follow the API's own field names, so the method is
+`payment_method` (`creditcard`, `directdebit`, `ideal`, `eps`, `applepay`,
+`paypal`). The 0.x `method` option throws `\InvalidArgumentException` rather
+than being dropped, because a dropped method is a checkout that lets the buyer
+pick any. `trial_days` is the one option with its own name (it is sent as
+`trial_days_override`).
 
 The buyer is redirected to the hosted Mollie checkout. When they finish, BillKit
 sends `subscription.created`; the package's webhook controller creates the local
@@ -76,13 +97,14 @@ billkit()->prices->update('price_pro_monthly', ['active' => false]);
 
 ## One-shot payments
 
-For a single, mandate-less charge (Cashier's `charge()`, a one-time purchase
-with nothing stored for future reuse), use `charge()`. Like `checkout()` it is
-redirect-based and returns the same `Checkout` responsable:
+For a single, mandate-less payment use `checkoutCharge()`, Cashier's name for
+the same hosted flow. There is no `charge()`: Cashier's `charge()` bills a
+stored card off-session, and a BillKit one-shot stores nothing to bill later.
+Like `checkout()` it returns a redirectable `Checkout`. The third argument is
+the payment method, sent as the API's `payment_method`:
 
 ```php
-// In a controller. Checkout is Responsable, so return it directly:
-return $request->user()->charge(1999, 'EUR', 'creditcard', [
+return $request->user()->checkoutCharge(1999, 'EUR', 'creditcard', [
     'success_url'        => route('thanks'),
     'cancel_url'         => route('cart'),
     'description'        => 'One premium widget',
@@ -90,51 +112,75 @@ return $request->user()->charge(1999, 'EUR', 'creditcard', [
 ]);
 ```
 
-The buyer completes the payment on the hosted Mollie page. The charge reaches a
-terminal state via the `one_shot_payment.succeeded` / `one_shot_payment.failed`
-webhooks, so react to them like any other event.
+The charge reaches a terminal state via the `one_shot_payment.succeeded` /
+`one_shot_payment.failed` webhooks, so react to them like any other event.
 
-To take the payment inside your own page instead, use `chargeEmbedded()`. It
-takes no method (the buyer picks it in the BillKit payment element) and returns
-the one-shot array with a short-lived `client_secret`, which is the only thing
-you hand to the browser for `@billkit-eu/js` or `@billkit-eu/react`:
+To take the payment inside your own page, use `checkoutChargeEmbedded()`. It
+takes no payment method (the buyer picks it in the BillKit payment element) and returns
+the `BillKit\Model\OneShotPayment` with a short-lived `client_secret`, the only
+thing you hand to the browser for `@billkit-eu/js` or `@billkit-eu/react`:
 
 ```php
-$payment = $request->user()->chargeEmbedded(1999, 'EUR', [
+$payment = $request->user()->checkoutChargeEmbedded(1999, 'EUR', [
     'success_url' => route('thanks'), // where 3-D Secure and bank redirects return
-    'description' => 'One premium widget',
 ]);
 
-return view('pay', ['clientSecret' => $payment['client_secret']]);
+return view('pay', ['clientSecret' => $payment->client_secret]);
 ```
 
-The same webhooks settle it, and `refundOneShot()` refunds it.
-
-Refund a settled one-shot (within its `refund_window_days`):
+Refunds, within the charge's `refund_window_days`:
 
 ```php
-$user->refundOneShot('osp_123');                       // full refund
-$user->refundOneShot('osp_123', ['amount_cents' => 500]); // partial
+$user->refundOneShot('osp_123');                            // full
+$user->refundOneShot('osp_123', ['amount_cents' => 500]);   // partial
+$user->refund('pay_123', ['amount_cents' => 500]);          // a subscription payment
 ```
+
+Every Billable method that takes `$options` accepts `idempotency_key`, which is
+sent as the request's `Idempotency-Key`. Derive it from your own order or job
+id so a retried job cannot charge or refund twice.
 
 ## Gate access
 
 ```php
 if ($user->subscribed()) {
-    // active, trialing, past_due, or within a cancel grace period
+    // the API's `serves_customer`: entitled, and for a canceling or paused
+    // subscription only until the end of the period already paid for
 }
 
 $user->onTrial();
 $user->onGracePeriod();
 ```
 
+There are **no subscription types**. Cashier's `subscription('default')` and
+`subscribed('swimming')` name a slot that BillKit never records, and 0.x only
+filtered on a `type` column your own code had to set. In 1.0 the methods take
+no type, and passing one throws `\InvalidArgumentException` instead of being
+silently ignored, which would let a customer on any plan through a gate written
+for one. To gate on a plan, check `$user->subscription()?->price_id`.
+`$user->subscription()` is the subscription serving the customer: the newest
+`valid()` one, or the newest of any state when none is valid.
+
+**`past_due` counts as subscribed.** `valid()` follows the API's
+`serves_customer`, which keeps a customer served while BillKit retries a failed
+renewal. Cashier's default revokes on `past_due`; if you want that, check
+`! $user->subscription()?->pastDue()` as well.
+
+The `Subscription` helpers keep Cashier's meanings. `onGracePeriod()` is a
+cancellation scheduled for the period end with that end still ahead
+(`renewal_state: canceling`). `canceled()` is true on the grace period and
+once the API has ended the subscription (`status: canceled`); `ended()` is the
+second half alone. A `status: canceled` subscription is never on a grace
+period, so `subscribed() || onGracePeriod()` grants exactly what `valid()`
+does.
+
 ## Manage a subscription
 
 ```php
 $sub = $user->subscription();      // BillKit\Laravel\Subscription
 
-$sub->swap('price_pro_yearly');    // change plan (proration handled server-side)
-$sub->previewSwap('price_pro_yearly'); // preview the proration first
+$sub->previewSwap('price_pro_yearly'); // quote the proration first (a PlanChangePreview)
+$sub->swap('price_pro_yearly', ['idempotency_key' => "swap-{$order->id}"]); // change plan
 $sub->cancel();                    // cancel at period end
 $sub->resume();                    // un-pause
 $sub->reactivate();                // undo a scheduled cancellation
@@ -150,6 +196,15 @@ $sub->paused();
 return redirect($sub->updatePaymentMethod(route('billing')));
 return $sub->redirectToBillingPortal(route('billing'));
 ```
+
+`cancel()`, `pause()`, `resume()`, `reactivate()`, `swap()` and `previewSwap()`
+take the PHP client's request options as their last argument
+(`['idempotency_key' => ...]`). The verbs re-sync the row from the response and
+dispatch `SubscriptionSynced` once the write is committed: inside your own
+`DB::transaction()` that is when your transaction commits, and never if it
+rolls back (the event implements `ShouldDispatchAfterCommit`). After `swap()` the row usually still has the old
+`price_id`: the switch lands when the proration charge settles, and the
+`subscription.updated` webhook moves it.
 
 ## Discounts and the payment method
 
@@ -196,15 +251,16 @@ $sub = $user->subscription();
 // Report consumption. Pass an identifier derived from the job, not uniqid().
 $sub->reportUsage(quantity: 1200, identifier: $job->uuid());
 
-// Reconcile: what has been reported but not yet billed.
-$sub->usageRecords('pending');
+// Reconcile: what has been reported but not yet billed (one page; the
+// result's autoPagingIterator() walks them all).
+$sub->usageRecords(['invoice_id' => 'pending']);
 
 // And what it comes to.
 $summary = $sub->usageSummary();
-$summary['pending_quantity'];     // 1200
-$summary['gross_cents'];          // 2400
-$summary['will_charge'];          // true
-$summary['minimum_charge_cents']; // 100
+$summary->pending_quantity;     // 1200
+$summary->gross_cents;          // 2400
+$summary->will_charge;          // true
+$summary->minimum_charge_cents; // 100
 ```
 
 **`$identifier` is the dedupe an idempotency key cannot do.** The key the SDK
@@ -241,17 +297,79 @@ None of these three touches the local `Subscription` row, unlike `swap()` or
 
 The package registers `POST /billkit/webhook` (signature-verified) and keeps
 `Subscription` rows in sync. Point a BillKit webhook endpoint at that URL and set
-`BILLKIT_WEBHOOK_SECRET`. React to any event with the dispatched Laravel events:
+`BILLKIT_WEBHOOK_SECRET`. Three Laravel events are the extension points:
+
+| Event | When | Carries |
+|---|---|---|
+| `WebhookReceived` | every verified delivery, before any sync | `event` (typed), `payload` (array) |
+| `SubscriptionSynced` | a local row was written and committed, from a webhook or an action verb | `subscription`, `event` (null for an action verb) |
+| `WebhookHandled` | after the package is done with the delivery | `event`, `payload` |
 
 ```php
 use BillKit\Laravel\Events\WebhookReceived;
+use BillKit\Model\InvoicePaidEvent;
 
 Event::listen(function (WebhookReceived $event) {
-    if ($event->payload['type'] === 'invoice.paid') {
-        // ...
+    if ($event->event instanceof InvoicePaidEvent) {
+        $invoice = $event->event->data;   // a BillKit\Model\Invoice
     }
 });
 ```
+
+`$event->event` is the delivery decoded into its typed class (one per event
+type the SDK knows, each with a typed `data`), or a plain `BillKit\Model\Event`
+for a type it does not know. `$event->payload` is the same delivery as an array,
+as in Cashier. `previous_attributes` sits beside `data`, holds the old value of
+each field that changed, and is always present: `null` when the event makes no
+claim about what changed.
+
+```php
+$previous = $event->event->previous_attributes;
+if ($previous !== null && array_key_exists('price_id', $previous)) {
+    // plan changed from $previous['price_id'] to $event->event->data['price_id']
+}
+```
+
+Let anything you do not recognise fall through: new event types are added
+without a package release.
+
+**Deliveries are not ordered.** Each is retried on its own schedule, so an old
+`subscription.updated` can arrive after the `subscription.canceled` that
+replaced it. The package handles this for the `Subscription` row: it stores
+the `created` of the newest event it applied (`last_event_created`) and skips
+anything older, and a skipped event dispatches no `SubscriptionSynced`. An
+event with the same `created` is applied, since BillKit sends a transition and
+its paired `subscription.updated` with one timestamp. `WebhookReceived`
+listeners see every delivery, stale ones included, so apply the same check to
+anything you store from them, and deduplicate on the event `id`.
+
+`created` is whole epoch seconds, so it is a coarse clock: two changes inside
+the same second are applied in arrival order, and the next event about that
+subscription puts the row right. If your application cannot tolerate that
+window, re-fetch on arrival
+(`$sub->syncFromApi(billkit()->subscriptions->retrieve($sub->billkit_id))`).
+
+`Subscription` and `WebhookController` are `final`. To add a relation to the
+model, use Eloquent's `Subscription::resolveRelationUsing()`; to own the route,
+set `billkit.path` to `null` and register your own, keeping the
+`VerifyWebhookSignature` middleware in front of it (the controller refuses a
+request the middleware did not verify).
+
+## UUID and ULID billable keys
+
+`billkit_subscriptions.billable_id` is created by the package migration with
+Laravel's `nullableMorphs()`, which follows the schema builder's default morph
+key type. If your billable model uses UUID or ULID keys, set that default
+before the migration runs, for example in `AppServiceProvider::boot()`:
+
+```php
+use Illuminate\Support\Facades\Schema;
+
+Schema::morphUsingUuids();   // or Schema::morphUsingUlids()
+```
+
+An app that already ran the migration with integer keys has to change the
+column itself.
 
 ## Logging
 
@@ -281,14 +399,25 @@ A dedicated channel keeps it out of your main log:
 ],
 ```
 
-**Never logged:** your API key or the `Authorization` header; request and response **bodies** (they carry customer PII); the **query string** (list filters carry values like `email=`). Failed calls throw a typed `BillKitException` rather than being logged, so you never get a duplicate entry. Catch it and log it your own way.
+**Never logged:** your API key or the `Authorization` header; request and response **bodies** (they carry customer PII); the **query string** (list filters carry values like `email=`). Failed calls throw rather than being logged, so you never get a duplicate entry: a `BillKit\Exception\BillKitException` subclass, which is `ApiException` for an HTTP error and `ApiConnectionException` (or its `ApiTimeoutException`) when the API could not be reached. Catch `BillKitException` and log it your own way.
+
+## Differences from Cashier, on purpose
+
+- No subscription types; `subscription()` is the one serving the customer.
+- `past_due` is entitled, following the API's `serves_customer`.
+- `checkoutCharge()` instead of `charge()`: there is no off-session charge.
+- Subscriptions are created by checkout and the webhook, never directly.
+- The payment method lives on the subscription, not the billable.
+- `Subscription` and the webhook controller are final; extend through events.
+- Responses from the PHP client are typed objects (`$customer->id`); array
+  access (`$customer['id']`) works too.
 
 ## Development
 
 ```bash
 composer install
 composer test      # PHPUnit via orchestra/testbench
-composer analyse   # PHPStan + larastan
+composer analyse   # PHPStan + larastan (level max)
 composer cs:check  # php-cs-fixer (@PSR12)
 ```
 

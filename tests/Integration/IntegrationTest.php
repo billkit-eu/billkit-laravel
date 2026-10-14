@@ -91,7 +91,7 @@ final class IntegrationTest extends IntegrationTestCase
         // Persisted on the billable, so a second call is a no-op rather than
         // a duplicate customer, the bug that silently doubles a tenant's
         // customer count.
-        self::assertTrue($user->fresh()->hasBillKitId());
+        self::assertTrue($user->fresh()?->hasBillKitId());
         self::assertSame($customerId, $user->createOrGetBillKitCustomer());
 
         $remote = $user->asBillKitCustomer();
@@ -116,15 +116,16 @@ final class IntegrationTest extends IntegrationTestCase
     {
         $user = $this->makeUser();
 
-        $payment = $user->chargeEmbedded(2500, 'EUR');
+        $payment = $user->checkoutChargeEmbedded(2500, 'EUR');
 
-        self::assertStringStartsWith('osp_', $payment['id']);
-        self::assertSame('embedded', $payment['ui_mode']);
-        self::assertNull($payment['redirect_url']);
-        self::assertNull($payment['method']);
-        self::assertIsString($payment['client_secret']);
-        self::assertStringStartsWith($payment['id'] . '_secret_', $payment['client_secret']);
-        self::assertSame($user->billkitId(), $payment['customer_id']);
+        self::assertStringStartsWith('osp_', (string) $payment->id);
+        self::assertSame('embedded', $payment->ui_mode);
+        self::assertNull($payment->redirect_url);
+        self::assertNull($payment->payment_method);
+        self::assertFalse($payment->has('method'));
+        self::assertIsString($payment->client_secret);
+        self::assertStringStartsWith($payment->id . '_secret_', $payment->client_secret);
+        self::assertSame($user->billkitId(), $payment->customer_id);
     }
 
     public function testLaravelSubscriptionSync(): void
@@ -195,14 +196,16 @@ final class IntegrationTest extends IntegrationTestCase
             static fn (array $p): bool => $p['subscription_id'] === $subscription->billkit_id,
         ));
         self::assertNotEmpty($match, 'the settled payment should be listed');
+        $paymentId = $match[0]['id'];
+        self::assertIsString($paymentId);
 
-        $refund = $user->refund((string) $match[0]['id'], ['amount_cents' => 4000]);
+        $refund = $user->refund($paymentId, ['amount_cents' => 4000]);
         self::assertSame(4000, $refund['amount_cents']);
 
         // The remainder stays refundable; a partial must not close the balance.
         $after = LaravelHarness::get(
             self::$tenant['api_key'],
-            '/v1/payments/' . $match[0]['id'],
+            '/v1/payments/' . $paymentId,
         );
         self::assertSame(4000, $after['amount_refunded_cents']);
         self::assertSame(6000, $after['amount_refundable_cents']);

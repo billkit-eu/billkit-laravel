@@ -38,7 +38,7 @@ final class LaravelHarness
     public static function provisionTenant(): array
     {
         [$status, $body] = self::postJson('/v1/console/auth/_test/login', [
-            'email' => 'laravel-it-' . bin2hex(random_bytes(12)) . '@sdk-it.example.com',
+            'email' => 'laravel-it-' . strtolower(\Illuminate\Support\Str::random(24)) . '@sdk-it.example.com',
             'mode' => 'test',
             'tenant_name' => 'Laravel SDK IT',
         ]);

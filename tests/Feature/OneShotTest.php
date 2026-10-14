@@ -9,7 +9,7 @@ use BillKit\Laravel\Tests\TestCase;
 
 final class OneShotTest extends TestCase
 {
-    public function test_charge_creates_customer_then_returns_hosted_redirect(): void
+    public function test_checkout_charge_creates_customer_then_returns_hosted_redirect(): void
     {
         $this->http
             ->stage(200, ['id' => 'cus_1', 'object' => 'customer'])
@@ -20,7 +20,7 @@ final class OneShotTest extends TestCase
             ]);
 
         $user = $this->makeUser();
-        $checkout = $user->charge(1999, 'EUR', 'creditcard', [
+        $checkout = $user->checkoutCharge(1999, 'EUR', 'creditcard', [
             'success_url' => 'https://app.test/ok',
             'cancel_url' => 'https://app.test/no',
             'description' => 'A single widget',
@@ -38,13 +38,13 @@ final class OneShotTest extends TestCase
         self::assertSame('cus_1', $body['customer_id']);
         self::assertSame(1999, $body['amount_cents']);
         self::assertSame('EUR', $body['currency']);
-        self::assertSame('creditcard', $body['method']);
+        self::assertSame('creditcard', $body['payment_method']);
         self::assertSame('https://app.test/ok', $body['success_url']);
         self::assertSame('https://app.test/no', $body['cancel_url']);
         self::assertSame('A single widget', $body['description']);
     }
 
-    public function test_charge_embedded_sends_ui_mode_without_method_and_returns_the_secret(): void
+    public function test_checkout_charge_embedded_sends_ui_mode_without_payment_method_and_returns_the_secret(): void
     {
         $this->http
             ->stage(200, ['id' => 'cus_1', 'object' => 'customer'])
@@ -52,13 +52,13 @@ final class OneShotTest extends TestCase
                 'id' => 'osp_e',
                 'object' => 'one_shot_payment',
                 'ui_mode' => 'embedded',
-                'method' => null,
+                'payment_method' => null,
                 'redirect_url' => null,
                 'client_secret' => 'osp_e_secret_abc',
             ]);
 
         $user = $this->makeUser();
-        $payment = $user->chargeEmbedded(1999, 'EUR', [
+        $payment = $user->checkoutChargeEmbedded(1999, 'EUR', [
             'success_url' => 'https://app.test/ok',
             'metadata' => ['order_id' => '7'],
         ]);
@@ -72,14 +72,14 @@ final class OneShotTest extends TestCase
 
         $body = $this->http->bodyOf($this->http->requests[1]);
         self::assertSame('embedded', $body['ui_mode']);
-        self::assertArrayNotHasKey('method', $body);
+        self::assertArrayNotHasKey('payment_method', $body);
         self::assertSame(1999, $body['amount_cents']);
         self::assertSame('EUR', $body['currency']);
         self::assertSame('https://app.test/ok', $body['success_url']);
         self::assertSame(['order_id' => '7'], $body['metadata']);
     }
 
-    public function test_hosted_charge_never_sends_ui_mode(): void
+    public function test_hosted_checkout_charge_never_sends_ui_mode(): void
     {
         $this->http->stage(200, [
             'id' => 'osp_h',
@@ -89,14 +89,14 @@ final class OneShotTest extends TestCase
 
         $user = $this->makeUser();
         $user->forceFill(['billkit_customer_id' => 'cus_x'])->save();
-        $user->charge(1000, 'EUR', 'creditcard', ['success_url' => 'https://app.test/ok']);
+        $user->checkoutCharge(1000, 'EUR', 'creditcard', ['success_url' => 'https://app.test/ok']);
 
         $body = $this->http->bodyOf($this->http->requests[0]);
-        self::assertSame('creditcard', $body['method']);
+        self::assertSame('creditcard', $body['payment_method']);
         self::assertArrayNotHasKey('ui_mode', $body);
     }
 
-    public function test_charge_keeps_metadata_on_payment_not_customer(): void
+    public function test_checkout_charge_keeps_metadata_on_payment_not_customer(): void
     {
         // metadata is payment-scoped (PaymentIntent semantics); it must reach
         // the one-shot payload but NOT leak into customer creation.
@@ -109,7 +109,7 @@ final class OneShotTest extends TestCase
             ]);
 
         $user = $this->makeUser();
-        $user->charge(1200, 'EUR', 'creditcard', [
+        $user->checkoutCharge(1200, 'EUR', 'creditcard', [
             'success_url' => 'https://app.test/ok',
             'metadata' => ['order_id' => '1024'],
         ]);
@@ -121,7 +121,7 @@ final class OneShotTest extends TestCase
         self::assertSame(['order_id' => '1024'], $paymentBody['metadata']);
     }
 
-    public function test_charge_without_success_url_omits_the_key(): void
+    public function test_checkout_charge_without_success_url_omits_the_key(): void
     {
         // With neither an option nor a config default, the key is dropped and
         // the API rejects it (success_url is required). Pin the behavior.
@@ -134,13 +134,13 @@ final class OneShotTest extends TestCase
 
         $user = $this->makeUser();
         $user->forceFill(['billkit_customer_id' => 'cus_x'])->save();
-        $user->charge(1000, 'EUR', 'creditcard', []);
+        $user->checkoutCharge(1000, 'EUR', 'creditcard', []);
 
         $body = $this->http->bodyOf($this->http->requests[0]);
         self::assertArrayNotHasKey('success_url', $body);
     }
 
-    public function test_charge_reuses_existing_customer_and_preserves_zero_refund_window(): void
+    public function test_checkout_charge_reuses_existing_customer_and_preserves_zero_refund_window(): void
     {
         $this->http->stage(200, [
             'id' => 'osp_2',
@@ -151,7 +151,7 @@ final class OneShotTest extends TestCase
         $user = $this->makeUser();
         $user->forceFill(['billkit_customer_id' => 'cus_existing'])->save();
 
-        $checkout = $user->charge(500, 'EUR', 'ideal', [
+        $checkout = $user->checkoutCharge(500, 'EUR', 'ideal', [
             'success_url' => 'https://app.test/ok',
             'refund_window_days' => 0,
         ]);
@@ -165,7 +165,7 @@ final class OneShotTest extends TestCase
         self::assertSame(0, $body['refund_window_days']);
     }
 
-    public function test_charge_is_responsable_and_redirects(): void
+    public function test_checkout_charge_is_responsable_and_redirects(): void
     {
         $this->http->stage(200, [
             'id' => 'osp_3',
@@ -176,7 +176,7 @@ final class OneShotTest extends TestCase
         $user = $this->makeUser();
         $user->forceFill(['billkit_customer_id' => 'cus_x'])->save();
 
-        $response = $user->charge(1000, 'EUR', 'bancontact', [
+        $response = $user->checkoutCharge(1000, 'EUR', 'bancontact', [
             'success_url' => 'https://app.test/ok',
         ])->toResponse(request());
 

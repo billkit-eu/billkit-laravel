@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BillKit\Laravel;
 
+use BillKit\Exception\BillKitException;
+use BillKit\Model\CheckoutSession;
+use BillKit\Model\OneShotPayment;
 use Illuminate\Contracts\Support\Responsable;
 use Illuminate\Http\RedirectResponse;
 
@@ -17,22 +20,36 @@ use Illuminate\Http\RedirectResponse;
 final class Checkout implements Responsable
 {
     /**
-     * @param array<string, mixed> $session the raw checkout-session object
+     * @internal built by {@see Billable::checkout()} and {@see Billable::checkoutCharge()}
      */
-    public function __construct(private readonly array $session)
+    public function __construct(private readonly CheckoutSession|OneShotPayment $session)
     {
     }
 
+    /** The checkout session, or the one-shot payment for {@see Billable::checkoutCharge()}. */
+    public function session(): CheckoutSession|OneShotPayment
+    {
+        return $this->session;
+    }
+
+    /**
+     * @throws BillKitException when the API's response carried no id
+     */
     public function id(): string
     {
-        return (string) ($this->session['id'] ?? '');
+        $id = $this->session->id;
+        if ($id === null || $id === '') {
+            throw new BillKitException('BillKit returned a checkout without an id.');
+        }
+
+        return $id;
     }
 
     /**
      * The hosted-checkout URL (null for embedded ``ui_mode`` sessions).
      *
      * Checkout sessions expose it as ``url``; a one-shot payment
-     * ({@see Billable::charge()}) exposes the same hosted redirect as
+     * ({@see Billable::checkoutCharge()}) exposes the same hosted redirect as
      * ``redirect_url``; both are surfaced here.
      */
     public function url(): ?string
@@ -51,11 +68,13 @@ final class Checkout implements Responsable
     }
 
     /**
+     * The response as a plain array.
+     *
      * @return array<string, mixed>
      */
     public function asArray(): array
     {
-        return $this->session;
+        return $this->session->toArray();
     }
 
     public function redirect(): RedirectResponse

@@ -90,7 +90,7 @@ abstract class IntegrationTestCase extends Orchestra
     {
         return User::query()->create([
             'name' => 'Ada Lovelace',
-            'email' => 'ada+' . bin2hex(random_bytes(8)) . '@example.com',
+            'email' => 'ada+' . strtolower(\Illuminate\Support\Str::random(16)) . '@example.com',
             'password' => 'secret',
         ]);
     }

@@ -150,6 +150,23 @@ final class WebhookTest extends TestCase
         )->assertForbidden();
     }
 
+    public function test_whitespace_webhook_secret_config_is_forbidden(): void
+    {
+        // Signed with the very same blank key, so only the guard refuses it:
+        // a whitespace secret is an unset variable, not a secret.
+        config()->set('billkit.webhook.secret', "  \t");
+        $body = (string) json_encode(['type' => 'subscription.created', 'data' => ['id' => 'sub_x']]);
+        $ts = time();
+        $signature = "t={$ts},v1=" . hash_hmac('sha256', $ts . '.' . $body, "  \t");
+
+        $this->call(
+            'POST',
+            '/billkit/webhook',
+            server: ['HTTP_BILLKIT_SIGNATURE' => $signature, 'CONTENT_TYPE' => 'application/json'],
+            content: $body,
+        )->assertForbidden();
+    }
+
     public function test_subscription_updated_reflects_new_status_and_period(): void
     {
         $user = $this->makeUser();

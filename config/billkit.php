@@ -72,8 +72,10 @@ return [
     | Checkout redirect URLs
     |--------------------------------------------------------------------------
     |
-    | Fallbacks used when a call to ->checkout() doesn't pass its own
-    | success_url / cancel_url. May be route names or absolute URLs.
+    | Fallbacks used when a call to ->checkout(), ->checkoutCharge() or
+    | ->checkoutChargeEmbedded() doesn't pass its own success_url /
+    | cancel_url. Either may be the name of a route without parameters
+    | (resolved with route() at call time) or an absolute URL.
     |
     */
     'success_url' => env('BILLKIT_SUCCESS_URL'),

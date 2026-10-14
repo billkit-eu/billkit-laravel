@@ -69,8 +69,24 @@ final class SubscriptionActionsTest extends TestCase
         self::assertSame('https://app.test/back', $body['return_url']);
     }
 
+    public function test_a_redirect_url_missing_from_the_response_is_an_error_not_an_empty_redirect(): void
+    {
+        $subscription = $this->makeSubscription('sub_4');
+        $this->http->stage(200, ['id' => 'bps_1'])->stage(200, ['object' => 'subscription']);
+
+        foreach (['billing portal session without a url' => fn (): string => $subscription->billingPortalUrl('https://app.test/back'),
+            'reauthorisation without a checkout_url' => fn (): string => $subscription->updatePaymentMethod('https://app.test/back')] as $message => $call) {
+            try {
+                $call();
+                self::fail('returned a URL the response did not carry');
+            } catch (\BillKit\Exception\BillKitException $e) {
+                self::assertStringContainsString($message, $e->getMessage());
+            }
+        }
+    }
+
     /**
-     * @return iterable<string, array{0: string, 1: string}>
+     * @return iterable<string, array{0: string, 1: non-empty-string}>
      */
     public static function emptyBodyVerbs(): iterable
     {
@@ -79,6 +95,9 @@ final class SubscriptionActionsTest extends TestCase
         yield 'reactivate' => ['reactivate', '/v1/subscriptions/sub_v/reactivate'];
     }
 
+    /**
+     * @param non-empty-string $expectedPath
+     */
     #[\PHPUnit\Framework\Attributes\DataProvider('emptyBodyVerbs')]
     public function test_lifecycle_verb_posts_to_the_right_path(string $method, string $expectedPath): void
     {
@@ -107,10 +126,22 @@ final class SubscriptionActionsTest extends TestCase
         self::assertSame('price_1', $subscription->fresh()?->price_id);
     }
 
-    public function test_update_payment_method_returns_redirect_url(): void
+    /**
+     * The API answers with `checkout_url`. 0.x read `url` and then
+     * `redirect_url`, neither of which the response has, so it returned ''
+     * to every caller, and this test staged `url` and pinned the bug.
+     */
+    public function test_update_payment_method_returns_the_checkout_url(): void
     {
         $subscription = $this->makeSubscription('sub_r');
-        $this->http->stage(200, ['url' => 'https://www.mollie.com/reauth/xyz']);
+        $this->http->stage(200, [
+            'object' => 'reauthorization',
+            'subscription_id' => 'sub_r',
+            'operation_id' => 'op_1',
+            'checkout_url' => 'https://www.mollie.com/reauth/xyz',
+            'verification_amount_cents' => 1,
+            'verification_currency' => 'EUR',
+        ]);
 
         $url = $subscription->updatePaymentMethod('https://app.test/back');
 
@@ -124,7 +155,7 @@ final class SubscriptionActionsTest extends TestCase
     public function test_report_usage_posts_quantity_and_identifier(): void
     {
         $subscription = $this->makeSubscription('sub_meter');
-        $this->http->stage(201, ['id' => 'ur_1', 'object' => 'usage_record', 'identifier' => 'job-42']);
+        $this->http->stage(200, ['id' => 'ur_1', 'object' => 'usage_record', 'identifier' => 'job-42']);
 
         $record = $subscription->reportUsage(1200, 'job-42');
 
@@ -143,7 +174,7 @@ final class SubscriptionActionsTest extends TestCase
         // Dedupe is opt-in: two identical reports at different times are
         // legitimately two records.
         $subscription = $this->makeSubscription('sub_meter2');
-        $this->http->stage(201, ['id' => 'ur_2']);
+        $this->http->stage(200, ['id' => 'ur_2']);
 
         $subscription->reportUsage();
 
@@ -156,7 +187,7 @@ final class SubscriptionActionsTest extends TestCase
         // cancel/swap/pause this must not re-sync the model from a response
         // that describes a usage record rather than a subscription.
         $subscription = $this->makeSubscription('sub_meter3');
-        $this->http->stage(201, ['id' => 'ur_3', 'status' => 'canceled', 'price_id' => 'price_wrong']);
+        $this->http->stage(200, ['id' => 'ur_3', 'status' => 'canceled', 'price_id' => 'price_wrong']);
 
         $subscription->reportUsage(5);
 
@@ -171,7 +202,7 @@ final class SubscriptionActionsTest extends TestCase
         $subscription = $this->makeSubscription('sub_meter4');
         $this->http->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
 
-        $subscription->usageRecords('pending', 25);
+        $subscription->usageRecords(['invoice_id' => 'pending', 'limit' => 25]);
 
         $uri = $this->http->lastRequest()->getUri();
         self::assertSame('GET', $this->http->lastRequest()->getMethod());

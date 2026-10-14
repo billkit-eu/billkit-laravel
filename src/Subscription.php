@@ -5,6 +5,13 @@ declare(strict_types=1);
 namespace BillKit\Laravel;
 
 use BillKit\BillKitClient;
+use BillKit\Collection;
+use BillKit\Exception\BillKitException;
+use BillKit\Laravel\Events\SubscriptionSynced;
+use BillKit\Model\PlanChangePreview;
+use BillKit\Model\Subscription as SubscriptionObject;
+use BillKit\Model\UsageRecord;
+use BillKit\Model\UsageSummary;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Http\RedirectResponse;
@@ -13,9 +20,15 @@ use Illuminate\Support\Carbon;
 /**
  * Local mirror of a BillKit subscription, kept in sync by the webhook
  * controller. Action methods delegate to the API and re-sync from the
- * response.
+ * response; every sync dispatches {@see SubscriptionSynced}.
  *
  * BillKit subscriptions are single-price, so there is no SubscriptionItem.
+ *
+ * The class is `final`. React to changes by listening for
+ * {@see SubscriptionSynced}, and add relations from your own code with
+ * Eloquent's `Subscription::resolveRelationUsing('team', fn ($s) => ...)`.
+ * The `type` column exists for schema compatibility and is always
+ * `'default'`; see {@see Billable::subscription()}.
  *
  * @property int $id
  * @property string|null $billable_type
@@ -38,10 +51,12 @@ use Illuminate\Support\Carbon;
  * @property string|null $card_last_four
  * @property int|null $card_exp_month
  * @property int|null $card_exp_year
+ * @property bool|null $serves_customer
+ * @property int|null $last_event_created
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-class Subscription extends Model
+final class Subscription extends Model
 {
     /** Statuses that grant entitlement (mirrors the API's ENTITLED set). */
     public const ENTITLED = ['active', 'trialing', 'past_due'];
@@ -65,6 +80,8 @@ class Subscription extends Model
             'discount_ends_at' => 'datetime',
             'card_exp_month' => 'integer',
             'card_exp_year' => 'integer',
+            'serves_customer' => 'boolean',
+            'last_event_created' => 'integer',
         ];
     }
 
@@ -78,10 +95,41 @@ class Subscription extends Model
 
     // ─── State ──────────────────────────────────────────────────────
 
-    /** Entitled (active/trialing/past_due) or still within a cancel grace period. */
+    /**
+     * Should the customer be served right now? What `subscribed()` reads.
+     *
+     * The API answers this itself as `serves_customer`, and the row mirrors
+     * it. Reading `status` alone over-grants: cancelling or pausing stops the
+     * renewals but leaves `status` at `active` until the period runs out, so
+     * a status check keeps serving a customer from whom no money will arrive.
+     *
+     * The mirrored answer is a snapshot taken when the row was last synced,
+     * and for a subscription that is not renewing (`canceling`, `paused`,
+     * `stopped`) the API's answer turns false at `current_period_end` without
+     * any event marking the moment. So a non-renewing row is also held to its
+     * period end here, which is the same rule the API applies.
+     *
+     * `serves_customer` is null only on a row no subscription payload has
+     * reached since the column was added. That row is answered from its
+     * status and renewal state by the same rule until the next webhook or
+     * action verb fills the column.
+     *
+     * `past_due` counts as served, because the API's `serves_customer` does:
+     * the customer keeps access while the payment is retried. Cashier's
+     * default revokes on `past_due`; add `&& ! $sub->pastDue()` if you want
+     * that.
+     */
     public function valid(): bool
     {
-        return in_array($this->status, self::ENTITLED, true) || $this->onGracePeriod();
+        $served = $this->serves_customer ?? in_array($this->status, self::ENTITLED, true);
+        if (! $served) {
+            return false;
+        }
+        if ($this->renewal_state === null || $this->renewal_state === 'auto_renew') {
+            return true;
+        }
+
+        return $this->current_period_end !== null && $this->current_period_end->isFuture();
     }
 
     public function active(): bool
@@ -119,22 +167,51 @@ class Subscription extends Model
         return $this->renewal_state === 'paused';
     }
 
+    /**
+     * Cashier's meaning: the customer has cancelled, whether or not the
+     * paid-through period is still running. True for a scheduled
+     * cancellation still on its grace period and for a subscription the API
+     * has ended (`status: canceled`). {@see self::ended()} is the terminal
+     * half alone.
+     */
     public function canceled(): bool
     {
-        return $this->status === 'canceled' || $this->canceled_at !== null;
+        return $this->terminated() || $this->onGracePeriod();
     }
 
-    /** Canceled-at-period-end but the paid-through period hasn't elapsed yet. */
+    /**
+     * Cancellation is scheduled for the period end and that end is still
+     * ahead. BillKit's shape for this is `status: active` with
+     * `renewal_state: canceling` and `cancel_at_period_end: true`.
+     *
+     * Never true once the API reports `status: canceled`. The API keeps
+     * `cancel_at_period_end` set when a scheduled cancellation is overtaken
+     * by an immediate one, so the flag and a future period end can both
+     * survive on a terminal row; answering true there would let Cashier's
+     * `subscribed() || onGracePeriod()` serve a customer the API has cut
+     * off, and disagree with {@see self::valid()}.
+     */
     public function onGracePeriod(): bool
     {
-        return $this->cancel_at_period_end
+        return ! $this->terminated()
+            && $this->cancel_at_period_end
             && $this->current_period_end !== null
             && $this->current_period_end->isFuture();
     }
 
+    /** Cancelled and no longer on a grace period: the API has ended it. */
     public function ended(): bool
     {
         return $this->canceled() && ! $this->onGracePeriod();
+    }
+
+    /**
+     * The API has ended the subscription. `canceled` is its only terminal
+     * status, and `canceled_at` is stamped only by that transition.
+     */
+    private function terminated(): bool
+    {
+        return $this->status === 'canceled' || $this->canceled_at !== null;
     }
 
     // ─── Discount ───────────────────────────────────────────────────
@@ -214,66 +291,97 @@ class Subscription extends Model
 
     // ─── Actions (delegate to the API, then re-sync) ────────────────
 
-    public function cancel(): self
+    /**
+     * Cancel at period end.
+     *
+     * While a renewal payment is still settling this, {@see self::pause()}
+     * and {@see self::swap()} throw a ``ConflictException`` (``409
+     * operation_pending``, ``reason`` is ``'renewal_processing'``) whose
+     * message names when to retry, and the row is not touched.
+     *
+     * @param array<string, mixed> $opts the PHP client's request options (`idempotency_key`, ...)
+     */
+    public function cancel(array $opts = []): self
     {
-        return $this->syncFromApi($this->client()->subscriptions->cancel($this->billkit_id));
+        return $this->syncFromAction($this->client()->subscriptions->cancel($this->billkit_id, [], $opts));
     }
 
-    public function pause(): self
+    /**
+     * Pause renewals. `paused()` turns true; `status` stays `active` for the
+     * period already paid for.
+     *
+     * @param array<string, mixed> $opts
+     */
+    public function pause(array $opts = []): self
     {
-        return $this->syncFromApi($this->client()->subscriptions->pause($this->billkit_id));
+        return $this->syncFromAction($this->client()->subscriptions->pause($this->billkit_id, [], $opts));
     }
 
-    public function resume(): self
+    /**
+     * @param array<string, mixed> $opts
+     */
+    public function resume(array $opts = []): self
     {
-        return $this->syncFromApi($this->client()->subscriptions->resume($this->billkit_id));
+        return $this->syncFromAction($this->client()->subscriptions->resume($this->billkit_id, [], $opts));
     }
 
-    /** Undo a scheduled cancellation while still inside the current period. */
-    public function reactivate(): self
+    /**
+     * Undo a scheduled cancellation while still inside the current period.
+     *
+     * @param array<string, mixed> $opts
+     */
+    public function reactivate(array $opts = []): self
     {
-        return $this->syncFromApi($this->client()->subscriptions->reactivate($this->billkit_id));
+        return $this->syncFromAction($this->client()->subscriptions->reactivate($this->billkit_id, [], $opts));
     }
 
     /**
      * Preview the proration of switching to another price (no state change).
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $opts
      */
-    public function previewSwap(string $priceId): array
+    public function previewSwap(string $priceId, array $opts = []): PlanChangePreview
     {
-        return $this->client()->subscriptions->previewUpdate($this->billkit_id, $priceId);
-    }
-
-    /** Switch to another price. */
-    public function swap(string $priceId): self
-    {
-        return $this->syncFromApi($this->client()->subscriptions->update($this->billkit_id, $priceId));
+        return $this->client()->subscriptions->previewUpdate($this->billkit_id, ['target_price_id' => $priceId], $opts);
     }
 
     /**
-     * Start a hosted re-authorization of the payment mandate.
+     * Switch to another price.
      *
-     * Returns the redirect URL to send the customer to (mandate re-auth is
-     * always a hosted redirect, never an inline confirm).
+     * The row usually keeps the old `price_id` after this returns: the switch
+     * lands when the proration charge settles, and the `subscription.updated`
+     * webhook moves the row then. Pass an `idempotency_key` derived from your
+     * own request when the swap can be retried.
+     *
+     * @param array<string, mixed> $opts
+     */
+    public function swap(string $priceId, array $opts = []): self
+    {
+        return $this->syncFromAction(
+            $this->client()->subscriptions->update($this->billkit_id, ['target_price_id' => $priceId], $opts),
+        );
+    }
+
+    /**
+     * Start a hosted re-authorisation of the payment mandate and return the
+     * URL to send the customer to (the response's `checkout_url`). Mandate
+     * re-authorisation is always a hosted redirect.
      */
     public function updatePaymentMethod(string $returnUrl): string
     {
-        $result = $this->client()->subscriptions->reauthorizePaymentMethod($this->billkit_id, $returnUrl);
-        $url = $result['url'] ?? $result['redirect_url'] ?? null;
-
-        return is_string($url) ? $url : '';
+        return self::requireUrl($this->client()->subscriptions->reauthorizePaymentMethod(
+            $this->billkit_id,
+            ['return_url' => $returnUrl],
+        )->checkout_url, 'reauthorisation', 'checkout_url');
     }
 
     /** Mint a customer-facing billing-portal URL scoped to this subscription. */
     public function billingPortalUrl(string $returnUrl): string
     {
-        $session = $this->client()->billingPortalSessions->create([
+        return self::requireUrl($this->client()->billingPortalSessions->create([
             'subscription_id' => $this->billkit_id,
             'return_url' => $returnUrl,
-        ]);
-
-        return is_string($session['url'] ?? null) ? $session['url'] : '';
+        ])->url, 'billing portal session', 'url');
     }
 
     public function redirectToBillingPortal(string $returnUrl): RedirectResponse
@@ -295,9 +403,9 @@ class Subscription extends Model
      *
      * `$identifier` is your own id for the event being metered, and it is
      * the dedupe an idempotency key cannot do. The key covers a retry of
-     * one HTTP request; `$identifier` covers a retry of *your* call — a
+     * one HTTP request; `$identifier` covers a retry of *your* call (a
      * queued job replaying, a webhook you handle twice, a retried
-     * `dispatch()` — which reaches the API as a genuinely new request with
+     * `dispatch()`), which reaches the API as a genuinely new request with
      * a new key. A second report of the same identifier returns the first
      * record unchanged rather than billing twice.
      *
@@ -306,38 +414,39 @@ class Subscription extends Model
      * primary key both work; a value that changes per attempt does not.
      *
      * @param array<string, string> $metadata
+     * @param array<string, mixed>  $opts     the PHP client's request options
      *
-     * @return array<string, mixed> the created (or already-existing) usage record
+     * @return UsageRecord the created (or already-existing) usage record
      */
     public function reportUsage(
         int $quantity = 1,
         ?string $identifier = null,
         ?int $occurredAt = null,
         array $metadata = [],
-    ): array {
+        array $opts = [],
+    ): UsageRecord {
         return $this->client()->subscriptions->createUsageRecord($this->billkit_id, array_filter([
             'quantity' => $quantity,
             'identifier' => $identifier,
             'occurred_at' => $occurredAt,
             'metadata' => $metadata === [] ? null : $metadata,
-        ], static fn ($v): bool => $v !== null));
+        ], static fn ($v): bool => $v !== null), $opts);
     }
 
     /**
-     * One page of usage records, newest first.
+     * One page of usage records, newest first, with the PHP client's
+     * `listUsageRecords()` params: `invoice_id` filters by billing state
+     * (`'pending'` is what the next period close will bill, a concrete
+     * `inv_…` id is what that invoice billed), `limit` and `starting_after`
+     * page. `->autoPagingIterator()` on the result walks every page.
      *
-     * `$invoiceId` filters by billing state: `'pending'` is what the next
-     * period close will bill, a concrete `inv_…` id is what that invoice
-     * billed. Null lists everything.
+     * @param array<string, mixed> $params
      *
-     * @return array<string, mixed>
+     * @return Collection<UsageRecord>
      */
-    public function usageRecords(?string $invoiceId = null, ?int $limit = null): array
+    public function usageRecords(array $params = []): Collection
     {
-        return $this->client()->subscriptions->listUsageRecords($this->billkit_id, array_filter([
-            'invoice_id' => $invoiceId,
-            'limit' => $limit,
-        ], static fn ($v): bool => $v !== null));
+        return $this->client()->subscriptions->listUsageRecords($this->billkit_id, $params);
     }
 
     /**
@@ -354,10 +463,8 @@ class Subscription extends Model
      * for both. A dashboard that renders `gross_cents` as "your next
      * invoice" without checking this is wrong exactly when the number is
      * small.
-     *
-     * @return array<string, mixed>
      */
-    public function usageSummary(): array
+    public function usageSummary(): UsageSummary
     {
         return $this->client()->subscriptions->retrieveUsageSummary($this->billkit_id);
     }
@@ -369,14 +476,27 @@ class Subscription extends Model
      * the action endpoints answer with the whole subscription but a caller
      * may pass a partial object. A field the payload sends as ``null`` is
      * written as ``null``: ``null`` is an answer, not a gap. Collapsing the
-     * two with ``??`` made a cleared field unclearable — a trial that
+     * two with ``??`` made a cleared field unclearable: a trial that
      * converts sends ``trial_end: null`` and would have left the old trial
      * date on the row forever.
      *
-     * @param array<string, mixed> $data
+     * This never moves ``last_event_created``. Only the webhook controller
+     * does, from the event's own ``created``. An action response carries no
+     * event time, and stamping it with this server's clock would let a skewed
+     * clock reject genuine later events. The action's own webhook arrives
+     * with a ``created`` newer than anything it superseded, so the watermark
+     * catches up from there.
+     *
+     * It dispatches nothing; the action verbs and the webhook controller
+     * dispatch {@see SubscriptionSynced} once the write is committed.
+     *
+     * @param SubscriptionObject|array<string, mixed> $data
      */
-    public function syncFromApi(array $data): self
+    public function syncFromApi(SubscriptionObject|array $data): self
     {
+        if ($data instanceof SubscriptionObject) {
+            $data = $data->toArray();
+        }
         $attributes = [];
         foreach (['price_id', 'renewal_state'] as $column) {
             if (array_key_exists($column, $data)) {
@@ -390,6 +510,9 @@ class Subscription extends Model
         }
         if (array_key_exists('cancel_at_period_end', $data)) {
             $attributes['cancel_at_period_end'] = (bool) $data['cancel_at_period_end'];
+        }
+        if (array_key_exists('serves_customer', $data)) {
+            $attributes['serves_customer'] = is_bool($data['serves_customer']) ? $data['serves_customer'] : null;
         }
         foreach ([
             'current_period_start' => 'current_period_start',
@@ -445,7 +568,7 @@ class Subscription extends Model
     private static function paymentMethodAttributes(mixed $method): array
     {
         $card = is_array($method) && is_string($method['type'] ?? null) ? $method : [];
-        $type = $card === [] ? null : $card['type'];
+        $type = is_string($card['type'] ?? null) ? $card['type'] : null;
 
         return [
             'payment_method_type' => $type,
@@ -456,10 +579,44 @@ class Subscription extends Model
         ];
     }
 
-    /** Epoch seconds to a Carbon, or null for anything that is not one. */
+    /** Sync from an action verb's response and announce it. */
+    private function syncFromAction(SubscriptionObject $data): self
+    {
+        $this->syncFromApi($data);
+        event(new SubscriptionSynced($this, null));
+
+        return $this;
+    }
+
+    /**
+     * A URL the caller is about to redirect to. An absent one is thrown on
+     * rather than returned as '', which would redirect to the current page.
+     */
+    private static function requireUrl(?string $url, string $what, string $field): string
+    {
+        if ($url === null || $url === '') {
+            throw new BillKitException("BillKit returned a {$what} without a {$field}.");
+        }
+
+        return $url;
+    }
+
+    /**
+     * Epoch seconds to a Carbon in the app's timezone, or null for anything
+     * that is not one.
+     *
+     * The timezone is passed explicitly because Carbon 3's
+     * `createFromTimestamp()` defaults to UTC where Carbon 2 used the PHP
+     * default. Eloquent stores a datetime as its wall-clock string with no
+     * offset and reads it back in the app timezone, so a UTC instance in an
+     * app on `Europe/Amsterdam` moved every period boundary by the offset:
+     * `valid()`, `onGracePeriod()` and `onTrial()` turned false an hour or
+     * two before the real end (and, west of UTC, stayed true that long
+     * after it). Laravel sets the PHP default from `app.timezone`.
+     */
     private static function ts(mixed $epoch): ?Carbon
     {
-        return is_int($epoch) ? Carbon::createFromTimestamp($epoch) : null;
+        return is_int($epoch) ? Carbon::createFromTimestamp($epoch, date_default_timezone_get()) : null;
     }
 
     private function client(): BillKitClient
